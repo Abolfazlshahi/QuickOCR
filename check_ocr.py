@@ -91,21 +91,57 @@ def main() -> None:
     win._apply_language("fa", save=True)
 
     # 5. Embedded Model Manager view + AnimatedStackedWidget slide + catalog check
-    assert len(ocr_engine.MODEL_CATALOG) >= 11
-    for req_id in ("ocria-nano", "ppocrv6-tiny", "ppocrv6-small", "ppocrv6-medium", "ppocrv5-arabic", "ppocrv5-cyrillic", "tesseract-multi", "marker-pdf"):
+    assert len(ocr_engine.MODEL_CATALOG) >= 16
+    rec_models = [m for m in ocr_engine.MODEL_CATALOG if m.get("recommended")]
+    assert len(rec_models) >= 6
+    for req_id in (
+        "ocria-nano",
+        "surya-ocr",
+        "tesseract-best",
+        "easyocr-fa",
+        "easyocr-ar-fa",
+        "easyocr-ru-zh",
+        "ppocrv6-tiny",
+        "ppocrv6-small",
+        "ppocrv6-medium",
+        "ppocrv5-arabic",
+        "ppocrv5-cyrillic",
+        "tesseract-multi",
+        "marker-pdf",
+    ):
         assert any(m["id"] == req_id for m in ocr_engine.MODEL_CATALOG), f"Missing {req_id}"
 
     win.stack.slideToIndex(1)
     qapp.processEvents()
     mv = win.models_view
+    assert mv._category == "recommended"
+    assert mv.cards_layout.count() == len(rec_models)
+    assert not mv.custom_card.isVisible()
+
+    mv._on_category_change("all")
+    qapp.processEvents()
+    assert mv.cards_layout.count() == len(ocr_engine.MODEL_CATALOG)
+    assert mv.custom_card.isVisible()
+
+    mv._on_category_change("api")
+    qapp.processEvents()
+    assert mv.cards_layout.count() == 0
     mv.url_edit.setText("http://localhost:1234/v1")
     mv.model_combo.setEditText("qwen2.5-vl-7b")
     mv._on_add_custom()
     assert win.config["active_model"].startswith("custom_")
     assert len(win.config["custom_models"]) == 1
+    assert mv.cards_layout.count() == 1
     mv._remove_model(win.config["active_model"], is_custom=True)
     assert win.config["active_model"] == "ocria-nano"
     assert len(win.config["custom_models"]) == 0
+
+    mv._on_category_change("recommended")
+    qapp.processEvents()
+    assert mv.cards_layout.count() == len(rec_models)
+    for i in range(mv.cards_layout.count()):
+        card_w = mv.cards_layout.itemAt(i).widget().minimumSizeHint().width()
+        assert card_w <= win.width(), f"Card {i} overflowed window width: {card_w} > {win.width()}"
     win.stack.slideToIndex(0)
     qapp.processEvents()
 

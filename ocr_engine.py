@@ -1,4 +1,4 @@
-"""Extensible multi-backend OCR engine (OCRia-nano, PP-OCRv6/v5/v4, Tesseract, Marker, Vision API)."""
+"""Extensible multi-backend OCR engine (OCRia-nano, Surya, EasyOCR, PP-OCRv6/v5/v4, Tesseract, Marker, Vision API)."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ import tempfile
 import threading
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from PIL import Image, ImageOps
 
@@ -23,34 +23,73 @@ BASE_DIR = Path(__file__).resolve().parent
 MODEL_DIR = BASE_DIR / "models"
 RAPID_DIR = MODEL_DIR / "rapidocr"
 TESSDATA_DIR = MODEL_DIR / "tessdata"
+TESSBEST_DIR = MODEL_DIR / "tessdata_best"
+EASYOCR_DIR = MODEL_DIR / "easyocr"
+SURYA_DIR = MODEL_DIR / "surya"
 os.environ.setdefault("LITEPARSE_MODEL_DIR", str(MODEL_DIR))
+os.environ.setdefault("MODEL_CACHE_DIR", str(SURYA_DIR))
+os.environ.setdefault("HF_HOME", str(MODEL_DIR / "hf"))
 
 from liteparse import LiteParse, models  # noqa: E402
 
 _engine_lock = threading.Lock()
 _liteparse_cache: Dict[str, LiteParse] = {}
 _rapid_cache: Dict[str, Any] = {}
+_easyocr_cache: Dict[str, Any] = {}
+_surya_cache: Optional[Callable[[Image.Image], Any]] = None
 _marker_cache: Any = None
 
-TESS_LANGS = ("fas", "eng", "chi_sim", "rus")
-TESSDATA_BASE_URL = "https://github.com/tesseract-ocr/tessdata_fast/raw/main"
+_TESS_VARIANTS: Dict[str, Tuple[Path, Tuple[str, ...], str]] = {
+    "tesseract-multi": (
+        TESSDATA_DIR,
+        ("fas", "eng", "chi_sim", "rus"),
+        "https://github.com/tesseract-ocr/tessdata_fast/raw/main",
+    ),
+    "tesseract-best": (
+        TESSBEST_DIR,
+        ("fas", "ara", "eng", "chi_sim", "rus"),
+        "https://github.com/tesseract-ocr/tessdata_best/raw/main",
+    ),
+}
 
 # Curated catalog of built-in & 1-click downloadable OCR models
-MODEL_CATALOG: List[Dict[str, str]] = [
+MODEL_CATALOG: List[Dict[str, Any]] = [
     {
         "id": "ocria-nano",
         "title": "OCRia-nano-1",
         "desc_key": "desc_ocria_nano",
         "category": "fast",
-        "langs": "FA • EN • ZH • +20",
+        "recommended": True,
+        "langs": "FA • AR • EN • ZH • +20",
         "badge": "45.6 MB • CPU",
         "kind": "liteparse_ocria",
+    },
+    {
+        "id": "surya-ocr",
+        "title": "Surya OCR (Multilingual SOTA)",
+        "desc_key": "desc_surya",
+        "category": "heavy",
+        "recommended": True,
+        "langs": "FA • AR • EN • ZH • +90",
+        "badge": "~1.2 GB • RTL",
+        "kind": "surya",
+    },
+    {
+        "id": "tesseract-best",
+        "title": "Tesseract Best LSTM (5-Lang RTL)",
+        "desc_key": "desc_tesseract_best",
+        "category": "heavy",
+        "recommended": True,
+        "langs": "FA • AR • EN • ZH • RU",
+        "badge": "~75 MB • Best LSTM",
+        "kind": "tesseract",
     },
     {
         "id": "ppocrv5-arabic",
         "title": "PP-OCRv5 Persian / Arabic",
         "desc_key": "desc_ppocrv5_arabic",
         "category": "fast",
+        "recommended": True,
         "langs": "FA • AR",
         "badge": "~12 MB • Mobile",
         "kind": "rapidocr",
@@ -59,10 +98,67 @@ MODEL_CATALOG: List[Dict[str, str]] = [
         "lang_type": "arabic",
     },
     {
+        "id": "easyocr-fa",
+        "title": "EasyOCR Persian + English",
+        "desc_key": "desc_easyocr_fa",
+        "category": "heavy",
+        "recommended": True,
+        "langs": "FA • EN",
+        "badge": "~100 MB • Neural",
+        "kind": "easyocr",
+        "langs_list": ["fa", "en"],
+    },
+    {
+        "id": "ppocrv6-medium",
+        "title": "PP-OCRv6 Medium",
+        "desc_key": "desc_ppocrv6_medium",
+        "category": "heavy",
+        "recommended": True,
+        "langs": "EN • ZH • Latin",
+        "badge": "~34 MB • High Acc",
+        "kind": "rapidocr",
+        "ocr_ver": "PPOCRV6",
+        "model_type": "MEDIUM",
+        "lang_type": "ch",
+    },
+    {
+        "id": "marker-pdf",
+        "title": "Marker (Surya AI Layout)",
+        "desc_key": "desc_marker",
+        "category": "heavy",
+        "recommended": True,
+        "langs": "FA • AR • EN • ZH • Math",
+        "badge": "~1.8 GB • PyTorch",
+        "kind": "marker",
+    },
+    {
+        "id": "easyocr-ar-fa",
+        "title": "EasyOCR Arabic + Persian + EN",
+        "desc_key": "desc_easyocr_ar",
+        "category": "heavy",
+        "recommended": False,
+        "langs": "AR • FA • EN",
+        "badge": "~115 MB • Neural",
+        "kind": "easyocr",
+        "langs_list": ["ar", "fa", "en"],
+    },
+    {
+        "id": "easyocr-ru-zh",
+        "title": "EasyOCR Russian + Chinese + EN",
+        "desc_key": "desc_easyocr_ruz",
+        "category": "heavy",
+        "recommended": False,
+        "langs": "RU • ZH • EN",
+        "badge": "~140 MB • Neural",
+        "kind": "easyocr",
+        "langs_list": ["ru", "ch_sim", "en"],
+    },
+    {
         "id": "ppocrv6-tiny",
         "title": "PP-OCRv6 Tiny",
         "desc_key": "desc_ppocrv6_tiny",
         "category": "fast",
+        "recommended": False,
         "langs": "EN • ZH • Latin",
         "badge": "~6 MB • Ultra-Fast",
         "kind": "rapidocr",
@@ -75,6 +171,7 @@ MODEL_CATALOG: List[Dict[str, str]] = [
         "title": "PP-OCRv6 Small",
         "desc_key": "desc_ppocrv6_small",
         "category": "fast",
+        "recommended": False,
         "langs": "EN • ZH • Latin",
         "badge": "~14 MB • Balanced",
         "kind": "rapidocr",
@@ -83,22 +180,11 @@ MODEL_CATALOG: List[Dict[str, str]] = [
         "lang_type": "ch",
     },
     {
-        "id": "ppocrv6-medium",
-        "title": "PP-OCRv6 Medium",
-        "desc_key": "desc_ppocrv6_medium",
-        "category": "heavy",
-        "langs": "EN • ZH • Latin",
-        "badge": "~34 MB • High Acc",
-        "kind": "rapidocr",
-        "ocr_ver": "PPOCRV6",
-        "model_type": "MEDIUM",
-        "lang_type": "ch",
-    },
-    {
         "id": "ppocrv5-cyrillic",
         "title": "PP-OCRv5 Russian / Cyrillic",
         "desc_key": "desc_ppocrv5_cyrillic",
         "category": "fast",
+        "recommended": False,
         "langs": "RU • Cyrillic",
         "badge": "~12 MB • Mobile",
         "kind": "rapidocr",
@@ -111,6 +197,7 @@ MODEL_CATALOG: List[Dict[str, str]] = [
         "title": "PP-OCRv5 English Fast",
         "desc_key": "desc_ppocrv5_en",
         "category": "fast",
+        "recommended": False,
         "langs": "EN",
         "badge": "~11 MB • Mobile",
         "kind": "rapidocr",
@@ -123,6 +210,7 @@ MODEL_CATALOG: List[Dict[str, str]] = [
         "title": "PP-OCRv5 Server HD",
         "desc_key": "desc_ppocrv5_server",
         "category": "heavy",
+        "recommended": False,
         "langs": "ZH • EN",
         "badge": "~85 MB • Server",
         "kind": "rapidocr",
@@ -135,6 +223,7 @@ MODEL_CATALOG: List[Dict[str, str]] = [
         "title": "PP-OCRv4 Persian / Arabic",
         "desc_key": "desc_ppocrv4_arabic",
         "category": "fast",
+        "recommended": False,
         "langs": "FA • AR",
         "badge": "~10 MB • Mobile",
         "kind": "rapidocr",
@@ -144,25 +233,17 @@ MODEL_CATALOG: List[Dict[str, str]] = [
     },
     {
         "id": "tesseract-multi",
-        "title": "Tesseract OCR (4-Lang)",
+        "title": "Tesseract OCR Fast (4-Lang)",
         "desc_key": "desc_tesseract",
         "category": "fast",
+        "recommended": False,
         "langs": "FA • EN • ZH • RU",
         "badge": "~25 MB • tessdata",
         "kind": "tesseract",
     },
-    {
-        "id": "marker-pdf",
-        "title": "Marker (Surya AI Layout)",
-        "desc_key": "desc_marker",
-        "category": "heavy",
-        "langs": "FA • EN • ZH • RU • Math",
-        "badge": "~1.8 GB • PyTorch",
-        "kind": "marker",
-    },
 ]
 
-_CATALOG_MAP: Dict[str, Dict[str, str]] = {m["id"]: m for m in MODEL_CATALOG}
+_CATALOG_MAP: Dict[str, Dict[str, Any]] = {m["id"]: m for m in MODEL_CATALOG}
 
 
 def _pip_python() -> str:
@@ -212,8 +293,19 @@ def is_rapidocr_pkg_installed() -> bool:
     )
 
 
-def is_tesseract_installed() -> bool:
-    has_data = all((TESSDATA_DIR / f"{lang}.traineddata").exists() for lang in TESS_LANGS)
+def is_easyocr_pkg_installed() -> bool:
+    return importlib.util.find_spec("easyocr") is not None
+
+
+def is_surya_installed() -> bool:
+    return importlib.util.find_spec("surya") is not None and (
+        (SURYA_DIR / ".ready").exists() or is_marker_installed()
+    )
+
+
+def is_tesseract_installed(model_id: str = "tesseract-multi") -> bool:
+    data_dir, langs, _ = _TESS_VARIANTS[model_id]
+    has_data = all((data_dir / f"{lang}.traineddata").exists() for lang in langs)
     return _find_tesseract_exe() is not None and has_data
 
 
@@ -224,14 +316,19 @@ def is_marker_installed() -> bool:
 def is_model_installed(model_id: str) -> bool:
     if model_id == "ocria-nano":
         return is_ocria_installed()[0]
-    if model_id == "tesseract-multi":
-        return is_tesseract_installed()
+    if model_id in _TESS_VARIANTS:
+        return is_tesseract_installed(model_id)
+    if model_id == "surya-ocr":
+        return is_surya_installed()
     if model_id == "marker-pdf":
         return is_marker_installed()
     spec = _CATALOG_MAP.get(model_id)
-    if spec and spec.get("kind") == "rapidocr":
-        marker_file = RAPID_DIR / f".ready_{model_id}"
-        return is_rapidocr_pkg_installed() and marker_file.exists()
+    if not spec:
+        return False
+    if spec.get("kind") == "rapidocr":
+        return is_rapidocr_pkg_installed() and (RAPID_DIR / f".ready_{model_id}").exists()
+    if spec.get("kind") == "easyocr":
+        return is_easyocr_pkg_installed() and (EASYOCR_DIR / f".ready_{model_id}").exists()
     return False
 
 
@@ -280,6 +377,40 @@ def _build_rapidocr_engine(model_id: str) -> Any:
     )
 
 
+def _build_easyocr_engine(model_id: str) -> Any:
+    import easyocr  # type: ignore
+
+    spec = _CATALOG_MAP[model_id]
+    EASYOCR_DIR.mkdir(parents=True, exist_ok=True)
+    return easyocr.Reader(
+        spec["langs_list"],
+        gpu=False,
+        model_storage_directory=str(EASYOCR_DIR),
+        verbose=False,
+    )
+
+
+def _build_surya_runner() -> Callable[[Image.Image], Any]:
+    os.environ.setdefault("MODEL_CACHE_DIR", str(SURYA_DIR))
+    os.environ.setdefault("HF_HOME", str(MODEL_DIR / "hf"))
+    try:
+        from surya import SuryaInferenceManager  # type: ignore
+        from surya.recognition import RecognitionPredictor  # type: ignore
+
+        manager = SuryaInferenceManager()
+        rec = RecognitionPredictor(manager)
+        return lambda img: rec([img])
+    except ImportError:
+        from surya.detection import DetectionPredictor  # type: ignore
+        from surya.foundation import FoundationPredictor  # type: ignore
+        from surya.recognition import RecognitionPredictor  # type: ignore
+
+        foundation = FoundationPredictor()
+        det = DetectionPredictor()
+        rec = RecognitionPredictor(foundation)
+        return lambda img: rec([img], det_predictor=det)
+
+
 def pull_model(from_dir: Optional[str] = None) -> str:
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     with _engine_lock:
@@ -289,19 +420,20 @@ def pull_model(from_dir: Optional[str] = None) -> str:
 
 def install_model(model_id: str) -> None:
     """One-click download & prepare any catalog model cleanly."""
-    global _marker_cache
+    global _marker_cache, _surya_cache
     if model_id == "ocria-nano":
         pull_model()
         return
 
-    if model_id == "tesseract-multi":
-        TESSDATA_DIR.mkdir(parents=True, exist_ok=True)
-        for lang in TESS_LANGS:
-            dest = TESSDATA_DIR / f"{lang}.traineddata"
+    if model_id in _TESS_VARIANTS:
+        data_dir, langs, base_url = _TESS_VARIANTS[model_id]
+        data_dir.mkdir(parents=True, exist_ok=True)
+        for lang in langs:
+            dest = data_dir / f"{lang}.traineddata"
             if not dest.exists():
-                url = f"{TESSDATA_BASE_URL}/{lang}.traineddata"
+                url = f"{base_url}/{lang}.traineddata"
                 req = urllib.request.Request(url, headers={"User-Agent": "QuickOCR"})
-                with urllib.request.urlopen(req, timeout=60.0) as resp:
+                with urllib.request.urlopen(req, timeout=90.0) as resp:
                     dest.write_bytes(resp.read())
 
         if _find_tesseract_exe() is None:
@@ -326,7 +458,19 @@ def install_model(model_id: str) -> None:
                     "tessdata downloaded, but tesseract.exe is not installed. Install UB-Mannheim TesseractOCR."
                 )
         with _engine_lock:
-            _liteparse_cache.pop("tesseract-multi", None)
+            _liteparse_cache.pop(model_id, None)
+        return
+
+    if model_id == "surya-ocr":
+        if importlib.util.find_spec("surya") is None:
+            _run_pip("install", "--no-warn-script-location", "surya-ocr")
+        SURYA_DIR.mkdir(parents=True, exist_ok=True)
+        dummy = Image.new("RGB", (96, 48), "white")
+        with _engine_lock:
+            runner = _build_surya_runner()
+            runner(dummy)
+            _surya_cache = runner
+        (SURYA_DIR / ".ready").write_text("ok", encoding="utf-8")
         return
 
     if model_id == "marker-pdf":
@@ -340,7 +484,10 @@ def install_model(model_id: str) -> None:
         return
 
     spec = _CATALOG_MAP.get(model_id)
-    if spec and spec.get("kind") == "rapidocr":
+    if not spec:
+        return
+
+    if spec.get("kind") == "rapidocr":
         if not is_rapidocr_pkg_installed():
             _run_pip("install", "--no-warn-script-location", "rapidocr[rtl]", "onnxruntime")
         dummy = Image.new("RGB", (64, 32), "white")
@@ -352,21 +499,41 @@ def install_model(model_id: str) -> None:
             _rapid_cache[model_id] = eng
         RAPID_DIR.mkdir(parents=True, exist_ok=True)
         (RAPID_DIR / f".ready_{model_id}").write_text("ok", encoding="utf-8")
+        return
+
+    if spec.get("kind") == "easyocr":
+        if not is_easyocr_pkg_installed():
+            _run_pip("install", "--no-warn-script-location", "easyocr")
+        with _engine_lock:
+            reader = _build_easyocr_engine(model_id)
+            _easyocr_cache[model_id] = reader
+        EASYOCR_DIR.mkdir(parents=True, exist_ok=True)
+        (EASYOCR_DIR / f".ready_{model_id}").write_text("ok", encoding="utf-8")
 
 
 def remove_model(model_id: str) -> None:
-    global _marker_cache
+    global _marker_cache, _surya_cache
     if model_id == "ocria-nano":
         with _engine_lock:
             _liteparse_cache.pop("ocria-nano", None)
         models.rm("ocria-nano")
         return
 
-    if model_id == "tesseract-multi":
+    if model_id in _TESS_VARIANTS:
+        data_dir, _, _ = _TESS_VARIANTS[model_id]
         with _engine_lock:
-            _liteparse_cache.pop("tesseract-multi", None)
-        if TESSDATA_DIR.exists():
-            shutil.rmtree(TESSDATA_DIR, ignore_errors=True)
+            _liteparse_cache.pop(model_id, None)
+        if data_dir.exists():
+            shutil.rmtree(data_dir, ignore_errors=True)
+        return
+
+    if model_id == "surya-ocr":
+        with _engine_lock:
+            _surya_cache = None
+        if SURYA_DIR.exists():
+            shutil.rmtree(SURYA_DIR, ignore_errors=True)
+        if importlib.util.find_spec("surya") is not None and not is_marker_installed():
+            _run_pip("uninstall", "-y", "surya-ocr")
         return
 
     if model_id == "marker-pdf":
@@ -376,22 +543,33 @@ def remove_model(model_id: str) -> None:
         return
 
     spec = _CATALOG_MAP.get(model_id)
-    if spec and spec.get("kind") == "rapidocr":
+    if not spec:
+        return
+    if spec.get("kind") == "rapidocr":
         with _engine_lock:
             _rapid_cache.pop(model_id, None)
         marker_file = RAPID_DIR / f".ready_{model_id}"
         if marker_file.exists():
             marker_file.unlink()
+    elif spec.get("kind") == "easyocr":
+        with _engine_lock:
+            _easyocr_cache.pop(model_id, None)
+        marker_file = EASYOCR_DIR / f".ready_{model_id}"
+        if marker_file.exists():
+            marker_file.unlink()
+        if EASYOCR_DIR.exists() and not any(EASYOCR_DIR.glob(".ready_*")):
+            shutil.rmtree(EASYOCR_DIR, ignore_errors=True)
 
 
 def _get_liteparse(model_id: str) -> LiteParse:
     if model_id not in _liteparse_cache:
-        if model_id == "tesseract-multi":
+        if model_id in _TESS_VARIANTS:
+            data_dir, langs, _ = _TESS_VARIANTS[model_id]
             _find_tesseract_exe()
             _liteparse_cache[model_id] = LiteParse(
                 ocr_backend="tesseract",
-                tessdata_path=str(TESSDATA_DIR),
-                ocr_language="+".join(TESS_LANGS),
+                tessdata_path=str(data_dir),
+                ocr_language="+".join(langs),
                 output_format="markdown",
                 quiet=True,
             )
@@ -411,6 +589,19 @@ def _get_rapidocr(model_id: str) -> Any:
     if model_id not in _rapid_cache:
         _rapid_cache[model_id] = _build_rapidocr_engine(model_id)
     return _rapid_cache[model_id]
+
+
+def _get_easyocr(model_id: str) -> Any:
+    if model_id not in _easyocr_cache:
+        _easyocr_cache[model_id] = _build_easyocr_engine(model_id)
+    return _easyocr_cache[model_id]
+
+
+def _get_surya() -> Callable[[Image.Image], Any]:
+    global _surya_cache
+    if _surya_cache is None:
+        _surya_cache = _build_surya_runner()
+    return _surya_cache
 
 
 def _get_marker() -> Any:
@@ -438,10 +629,19 @@ def warm_up(active_model_id: str = "ocria-nano") -> None:
                 os.remove(tmp_path)
             except OSError:
                 pass
-    elif active_model_id in _CATALOG_MAP and _CATALOG_MAP[active_model_id]["kind"] == "rapidocr":
-        if is_model_installed(active_model_id):
-            with _engine_lock:
-                _get_rapidocr(active_model_id)
+        return
+
+    spec = _CATALOG_MAP.get(active_model_id)
+    if not spec or not is_model_installed(active_model_id):
+        return
+    kind = spec["kind"]
+    with _engine_lock:
+        if kind == "rapidocr":
+            _get_rapidocr(active_model_id)
+        elif kind == "easyocr":
+            _get_easyocr(active_model_id)
+        elif kind == "tesseract":
+            _get_liteparse(active_model_id)
 
 
 def fetch_remote_models(base_url: str, api_key: str = "") -> List[str]:
@@ -511,6 +711,28 @@ def _extract_rapidocr(image: Image.Image, model_id: str, output_format: str) -> 
         except Exception:
             pass
     return "\n".join(t for t in res.txts if t).strip()
+
+
+def _extract_easyocr(image: Image.Image, model_id: str) -> str:
+    import numpy as np  # type: ignore
+
+    with _engine_lock:
+        reader = _get_easyocr(model_id)
+        lines = reader.readtext(np.array(image), detail=0, paragraph=True)
+    return "\n".join(str(line).strip() for line in lines if str(line).strip()).strip()
+
+
+def _extract_surya(image: Image.Image) -> str:
+    with _engine_lock:
+        preds = _get_surya()(image)
+    if not preds:
+        return ""
+    lines = getattr(preds[0], "text_lines", None) or []
+    return "\n".join(
+        getattr(line, "text", "").strip()
+        for line in lines
+        if getattr(line, "text", "").strip()
+    ).strip()
 
 
 def _extract_marker(image: Image.Image) -> str:
@@ -600,8 +822,12 @@ def extract_text(
         kind = spec["kind"]
         if kind == "rapidocr":
             return _extract_rapidocr(image, active_model_id, output_format)
+        if kind == "easyocr":
+            return _extract_easyocr(image, active_model_id)
+        if kind == "surya":
+            return _extract_surya(image)
         if kind == "tesseract":
-            return _extract_liteparse(image, "tesseract-multi", output_format)
+            return _extract_liteparse(image, active_model_id, output_format)
         if kind == "marker":
             return _extract_marker(image)
         return _extract_liteparse(image, "ocria-nano", output_format)

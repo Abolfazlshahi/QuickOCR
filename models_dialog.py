@@ -97,7 +97,7 @@ class ModelsView(QWidget):
         self.custom_models = [dict(m) for m in custom_models]
         self.on_models_changed = on_models_changed
         self.on_back = on_back
-        self._category = "all"
+        self._category = "recommended"
         self._busy = False
 
         self.signals = _WorkerSignals()
@@ -153,15 +153,16 @@ class ModelsView(QWidget):
         # Animated category filter bar
         self.cat_seg = AnimatedSegmented(
             options=(
+                ("recommended", self._t("tab_rec")),
                 ("all", self._t("tab_all")),
                 ("fast", self._t("tab_fast")),
                 ("heavy", self._t("tab_heavy")),
                 ("api", self._t("tab_api")),
             ),
-            initial="all",
+            initial="recommended",
             on_change=self._on_category_change,
             height=30,
-            min_seg_width=70,
+            min_seg_width=54,
         )
         root.addWidget(self.cat_seg)
 
@@ -170,6 +171,7 @@ class ModelsView(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setAlignment(Qt.AlignTop)
         scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.viewport().setAutoFillBackground(True)
         scroll.viewport().setStyleSheet(f"background-color: {C_BG};")
         root.addWidget(scroll, 1)
@@ -249,6 +251,22 @@ class ModelsView(QWidget):
         self.model_combo.setEditText("qwen2.5-vl")
         cc.addWidget(self.model_combo)
 
+        for chip_pair in (
+            ("qwen2.5-vl", "deepseek-ocr"),
+            ("MedAIBase/PaddleOCR-VL", "richardyoung/olmocr2:7b-q8"),
+        ):
+            vlm_row = QHBoxLayout()
+            vlm_row.setSpacing(6)
+            for mname in chip_pair:
+                chip = AnimatedButton(mname, variant="ghost", radius=7, height=22, padx=8)
+                chip.setLayoutDirection(Qt.LeftToRight)
+                chip.clicked.connect(
+                    lambda _=False, n=mname: self.model_combo.setEditText(n)
+                )
+                vlm_row.addWidget(chip)
+            vlm_row.addStretch(1)
+            cc.addLayout(vlm_row)
+
         self.key_lbl = QLabel(self._t("lbl_api_key"))
         self.key_lbl.setStyleSheet(f"color: {C_MUTED}; font-size: 8.5pt; background: transparent;")
         cc.addWidget(self.key_lbl)
@@ -266,6 +284,7 @@ class ModelsView(QWidget):
         cc.addWidget(self.add_custom_btn)
 
         self.scroll_col.addWidget(self.custom_card)
+        self.scroll_col.addStretch(1)
 
         # Status line
         self.status_lbl = QLabel("")
@@ -280,7 +299,13 @@ class ModelsView(QWidget):
         self.title_lbl.setText(self._t("models_title"))
         self.import_btn.setText(self._t("btn_import_dir"))
         self.cat_seg.update_labels(
-            [self._t("tab_all"), self._t("tab_fast"), self._t("tab_heavy"), self._t("tab_api")]
+            [
+                self._t("tab_rec"),
+                self._t("tab_all"),
+                self._t("tab_fast"),
+                self._t("tab_heavy"),
+                self._t("tab_api"),
+            ]
         )
         self.sec1_lbl.setText(self._t("models_local_sec"))
         self.sec2_lbl.setText(self._t("models_custom_sec"))
@@ -307,7 +332,7 @@ class ModelsView(QWidget):
 
     def _rebuild_list(self) -> None:
         self._clear_cards()
-        show_local = self._category in ("all", "fast", "heavy")
+        show_local = self._category in ("recommended", "all", "fast", "heavy")
         show_custom = self._category in ("all", "api")
 
         self.sec1_lbl.setVisible(show_local or (show_custom and len(self.custom_models) > 0))
@@ -316,7 +341,10 @@ class ModelsView(QWidget):
 
         if show_local:
             for spec in ocr_engine.MODEL_CATALOG:
-                if self._category != "all" and spec["category"] != self._category:
+                if self._category == "recommended":
+                    if not spec.get("recommended"):
+                        continue
+                elif self._category != "all" and spec["category"] != self._category:
                     continue
                 mid = spec["id"]
                 installed = ocr_engine.is_model_installed(mid)
@@ -331,6 +359,7 @@ class ModelsView(QWidget):
                     "desc": self._t(spec["desc_key"]),
                     "langs": spec["langs"],
                     "badge": spec["badge"],
+                    "recommended": bool(spec.get("recommended")),
                     "installed": installed,
                     "can_download": True,
                     "can_remove": installed,
@@ -355,13 +384,10 @@ class ModelsView(QWidget):
         card = QFrame()
         card.setObjectName("Card")
         card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-        row = QHBoxLayout(card)
-        row.setSizeConstraint(QLayout.SetMinimumSize)
-        row.setContentsMargins(12, 10, 12, 10)
-        row.setSpacing(10)
-
-        info_col = QVBoxLayout()
-        info_col.setSpacing(4)
+        col = QVBoxLayout(card)
+        col.setSizeConstraint(QLayout.SetMinimumSize)
+        col.setContentsMargins(12, 10, 12, 10)
+        col.setSpacing(6)
 
         top_line = QHBoxLayout()
         top_line.setSpacing(6)
@@ -393,10 +419,17 @@ class ModelsView(QWidget):
         badge.setStyleSheet(badge_style)
         top_line.addWidget(badge)
         top_line.addStretch(1)
-        info_col.addLayout(top_line)
+        col.addLayout(top_line)
 
         meta_line = QHBoxLayout()
         meta_line.setSpacing(6)
+        if entry.get("recommended"):
+            rec_pill = QLabel(f"★ {self._t('badge_rec')}")
+            rec_pill.setStyleSheet(
+                "background: #1B180E; color: #FACC15; border: 1px solid #3D3514; "
+                "border-radius: 5px; padding: 1px 6px; font-size: 7.5pt;"
+            )
+            meta_line.addWidget(rec_pill)
         for tag_text in (entry["langs"], entry["badge"]):
             pill = QLabel(tag_text)
             pill.setLayoutDirection(Qt.LeftToRight)
@@ -406,28 +439,28 @@ class ModelsView(QWidget):
             )
             meta_line.addWidget(pill)
         meta_line.addStretch(1)
-        info_col.addLayout(meta_line)
+        col.addLayout(meta_line)
 
         desc_lbl = QLabel(entry["desc"])
         desc_lbl.setStyleSheet(f"color: {C_DIM}; font-size: 8pt; background: transparent;")
         desc_lbl.setWordWrap(True)
-        info_col.addWidget(desc_lbl)
-        row.addLayout(info_col, 1)
+        col.addWidget(desc_lbl)
 
         mid = entry["id"]
+        action_btns: List[AnimatedButton] = []
         if entry["installed"] and not is_active:
             sel_btn = AnimatedButton(
                 self._t("btn_select"), variant="primary", radius=8, height=28, padx=12
             )
             sel_btn.clicked.connect(lambda _=False, m=mid: self._select_model(m))
-            row.addWidget(sel_btn)
+            action_btns.append(sel_btn)
         elif not entry["installed"] and entry["can_download"]:
             dl_btn = AnimatedButton(
                 self._t("btn_download"), variant="secondary", radius=8, height=28, padx=12
             )
             dl_btn.setEnabled(not self._busy)
             dl_btn.clicked.connect(lambda _=False, m=mid: self._download_model(m))
-            row.addWidget(dl_btn)
+            action_btns.append(dl_btn)
 
         if entry["can_remove"] and (is_custom or mid != "ocria-nano" or not is_active):
             rm_btn = AnimatedButton(
@@ -437,7 +470,15 @@ class ModelsView(QWidget):
             rm_btn.clicked.connect(
                 lambda _=False, m=mid, c=is_custom: self._remove_model(m, c)
             )
-            row.addWidget(rm_btn)
+            action_btns.append(rm_btn)
+
+        if action_btns:
+            act_line = QHBoxLayout()
+            act_line.setSpacing(6)
+            for btn in action_btns:
+                act_line.addWidget(btn)
+            act_line.addStretch(1)
+            col.addLayout(act_line)
 
         return card
 
