@@ -15,6 +15,7 @@ from PySide6.QtCore import (
     QRectF,
     Qt,
     QTimer,
+    Property,
     Signal,
 )
 from PySide6.QtGui import (
@@ -122,6 +123,7 @@ class SnipOverlay(QWidget):
         self._start: Optional[QPoint] = None
         self._current: Optional[QPoint] = None
         self._dash_offset = 0.0
+        self._intro = 0.0
 
         if screenshot is not None:
             self._raw_shot = screenshot
@@ -141,24 +143,32 @@ class SnipOverlay(QWidget):
         self.setAttribute(Qt.WA_DeleteOnClose, True)
         self.setCursor(Qt.CrossCursor)
         self.setGeometry(geom)
-        self.setWindowOpacity(0.0)
 
         self._dash_timer = QTimer(self)
-        self._dash_timer.setInterval(24)
+        self._dash_timer.setInterval(16)
         self._dash_timer.timeout.connect(self._tick_dash)
 
-        self._fade_anim = QPropertyAnimation(self, b"windowOpacity", self)
-        self._fade_anim.setDuration(130)
-        self._fade_anim.setStartValue(0.0)
-        self._fade_anim.setEndValue(1.0)
-        self._fade_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._intro_anim = QPropertyAnimation(self, b"introProgress", self)
+        self._intro_anim.setDuration(240)
+        self._intro_anim.setStartValue(0.0)
+        self._intro_anim.setEndValue(1.0)
+        self._intro_anim.setEasingCurve(QEasingCurve.OutCubic)
+
+    @Property(float)
+    def introProgress(self) -> float:
+        return self._intro
+
+    @introProgress.setter
+    def introProgress(self, val: float) -> None:
+        self._intro = val
+        self.update()
 
     def start(self) -> None:
         self.show()
         self.raise_()
         self.activateWindow()
         self.setFocus()
-        self._fade_anim.start()
+        self._intro_anim.start()
 
     def _tick_dash(self) -> None:
         self._dash_offset = (self._dash_offset - 0.5) % 10.0
@@ -219,7 +229,7 @@ class SnipOverlay(QWidget):
             return
         self._closed = True
         self._dash_timer.stop()
-        self._fade_anim.stop()
+        self._intro_anim.stop()
         self.close()
 
     def mousePressEvent(self, event) -> None:
@@ -244,11 +254,12 @@ class SnipOverlay(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
 
-        # Fullscreen frozen shot + dark scrim
+        # Fullscreen frozen shot + animated scrim darkness (60fps, zero DWM flicker)
         p.drawPixmap(self.rect(), self._pixmap)
-        p.fillRect(self.rect(), QColor(0, 0, 0, 145))
+        scrim_alpha = int(152 * self._intro)
+        p.fillRect(self.rect(), QColor(0, 0, 0, scrim_alpha))
 
-        # Top rounded instruction pill
+        # Top rounded instruction pill sliding smoothly down into view
         hint_font = QFont(self.font())
         hint_font.setPointSize(9)
         hint_font.setWeight(QFont.DemiBold)
@@ -256,11 +267,13 @@ class SnipOverlay(QWidget):
         fm = QFontMetrics(hint_font)
         pill_w = fm.horizontalAdvance(self._hint_text) + 38
         pill_h = 34
-        pill_rect = QRectF((self.width() - pill_w) / 2.0, 20.0, pill_w, pill_h)
-        p.setBrush(QColor(12, 12, 14, 235))
-        p.setPen(QPen(QColor("#3F3F46"), 1.0))
+        pill_y = -40.0 + 60.0 * self._intro
+        pill_rect = QRectF((self.width() - pill_w) / 2.0, pill_y, pill_w, pill_h)
+        pill_alpha = int(238 * self._intro)
+        p.setBrush(QColor(12, 12, 14, pill_alpha))
+        p.setPen(QPen(QColor(63, 63, 70, pill_alpha), 1.0))
         p.drawRoundedRect(pill_rect, pill_h / 2.0, pill_h / 2.0)
-        p.setPen(QColor("#FAFAFA"))
+        p.setPen(QColor(250, 250, 250, int(255 * self._intro)))
         p.drawText(pill_rect, Qt.AlignCenter, self._hint_text)
 
         rect = self._selection_rect()
@@ -273,12 +286,15 @@ class SnipOverlay(QWidget):
         p.drawPixmap(self.rect(), self._pixmap)
         p.restore()
 
-        # Animated marching dashed guide
-        dash_pen = QPen(QColor(255, 255, 255, 190), 1.0)
+        # Subtle glowing outer halo + animated marching dashed guide
+        p.setPen(QPen(QColor(255, 255, 255, 42), 3.0))
+        p.setBrush(Qt.NoBrush)
+        p.drawRect(QRectF(rect).adjusted(-0.5, -0.5, 0.5, 0.5))
+
+        dash_pen = QPen(QColor(255, 255, 255, 200), 1.0)
         dash_pen.setDashPattern([6, 4])
         dash_pen.setDashOffset(self._dash_offset)
         p.setPen(dash_pen)
-        p.setBrush(Qt.NoBrush)
         p.drawRect(QRectF(rect).adjusted(0.5, 0.5, -0.5, -0.5))
 
         # Crisp white L-shaped rounded-cap corner viewfinder brackets

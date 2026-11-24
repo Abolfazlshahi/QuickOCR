@@ -64,7 +64,7 @@ def main() -> None:
     win.show_window()
     qapp.processEvents()
 
-    # Verify visual pill placement in each language
+    # Verify visual pill placement & Telegram banner in each language
     for lang, expected_dir, expected_idx, expected_vis_pos in (
         ("fa", Qt.RightToLeft, 0, 2.0),  # Rightmost slot in RTL = فارسی
         ("en", Qt.LeftToRight, 1, 1.0),  # Middle slot in LTR = EN
@@ -74,6 +74,7 @@ def main() -> None:
         qapp.processEvents()
         assert qapp.layoutDirection() == expected_dir
         assert win.lang_seg._idx == expected_idx
+        assert win.tg_banner._text == win._t("tg_promo")
         n = len(win.lang_seg._items)
         is_rtl = win.lang_seg.layoutDirection() == Qt.RightToLeft
         vis_pos = ((n - 1.0) - win.lang_seg._pos) if is_rtl else win.lang_seg._pos
@@ -81,7 +82,7 @@ def main() -> None:
             f"Pill mismatch for {lang}: got vis_pos={vis_pos}, expected {expected_vis_pos}"
         )
 
-    for w, h in ((400, 500), (485, 655), (640, 680)):
+    for w, h in ((400, 500), (495, 675), (640, 680)):
         win.resize(w, h)
         qapp.processEvents()
         assert win.width() >= w and win.height() >= h

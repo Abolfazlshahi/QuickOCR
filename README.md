@@ -9,10 +9,15 @@
 </p>
 
 <p align="center">
+  <a href="https://t.me/pythash"><img src="https://img.shields.io/badge/Telegram-%40pythash-000000?style=flat-square&logo=telegram" alt="Telegram @pythash" /></a>
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-000000?style=flat-square" alt="Windows" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-000000?style=flat-square" alt="Python" />
   <img src="https://img.shields.io/badge/Engine-OCRia--nano--1-000000?style=flat-square" alt="OCRia-nano-1" />
   <img src="https://img.shields.io/badge/License-MIT-000000?style=flat-square" alt="License" />
+</p>
+
+<p align="center">
+  Join our Telegram channel <a href="https://t.me/pythash"><b>@pythash</b></a> for updates, releases, and tips.
 </p>
 
 ---

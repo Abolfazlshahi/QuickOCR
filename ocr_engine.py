@@ -80,10 +80,15 @@ def is_rapidocr_installed() -> bool:
     return importlib.util.find_spec("rapidocr_onnxruntime") is not None
 
 
+def _pip_python() -> str:
+    venv_py = BASE_DIR / ".venv" / "Scripts" / "python.exe"
+    return str(venv_py) if venv_py.exists() else sys.executable
+
+
 def install_rapidocr() -> None:
     global _rapid_cache
     subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--no-warn-script-location", "rapidocr-onnxruntime"],
+        [_pip_python(), "-m", "pip", "install", "--no-warn-script-location", "rapidocr-onnxruntime"],
         check=True,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
@@ -95,7 +100,7 @@ def install_rapidocr() -> None:
 def remove_rapidocr() -> None:
     global _rapid_cache
     subprocess.run(
-        [sys.executable, "-m", "pip", "uninstall", "-y", "rapidocr-onnxruntime"],
+        [_pip_python(), "-m", "pip", "uninstall", "-y", "rapidocr-onnxruntime"],
         check=True,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )

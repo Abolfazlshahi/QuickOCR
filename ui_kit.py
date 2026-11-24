@@ -1,4 +1,4 @@
-"""Minimal pure-black rounded PySide6 components and 60fps animations."""
+"""Minimal pure-black rounded PySide6 components, Win32 taskbar icon fix, and 60fps animations."""
 
 from __future__ import annotations
 
@@ -15,10 +15,12 @@ from PySide6.QtCore import (
     QSize,
     Qt,
     QTimer,
+    QUrl,
     Property,
 )
 from PySide6.QtGui import (
     QColor,
+    QDesktopServices,
     QFont,
     QFontDatabase,
     QFontMetrics,
@@ -28,10 +30,6 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractButton,
-    QFrame,
-    QGraphicsOpacityEffect,
-    QHBoxLayout,
-    QLabel,
     QPushButton,
     QSizePolicy,
     QWidget,
@@ -41,11 +39,11 @@ from PySide6.QtWidgets import (
 C_BG = "#000000"
 C_CARD = "#0C0C0C"
 C_SURFACE = "#161616"
-C_SURFACE_HOVER = "#232323"
+C_SURFACE_HOVER = "#2A2A2E"
 C_BORDER = "#242426"
 C_BORDER_FOCUS = "#52525B"
 C_ACCENT = "#FAFAFA"
-C_ACCENT_HOVER = "#E4E4E7"
+C_ACCENT_HOVER = "#D4D4D8"
 C_ON_ACCENT = "#000000"
 C_TEXT = "#FAFAFA"
 C_MUTED = "#A1A1AA"
@@ -53,9 +51,10 @@ C_DIM = "#71717A"
 C_OK = "#22C55E"
 C_WARN = "#F59E0B"
 C_DANGER_BG = "#160D0D"
-C_DANGER_HOVER = "#241414"
+C_DANGER_HOVER = "#2B1517"
 C_DANGER_FG = "#F87171"
 C_DANGER_BORDER = "#3B1B1B"
+C_DANGER_BORDER_HOVER = "#7F1D1D"
 
 APP_QSS = f"""
 QWidget#MainRoot {{
@@ -151,10 +150,39 @@ def load_app_fonts(fonts_dir: Path) -> str:
     return loaded_family
 
 
-def enable_dark_window(win: QWidget) -> None:
-    """Apply pure black Windows 11 titlebar, rounded corners, and hairline border."""
+class _GUID(ctypes.Structure):
+    _fields_ = [
+        ("Data1", ctypes.c_uint32),
+        ("Data2", ctypes.c_uint16),
+        ("Data3", ctypes.c_uint16),
+        ("Data4", ctypes.c_ubyte * 8),
+    ]
+
+
+class _PROPERTYKEY(ctypes.Structure):
+    _fields_ = [("fmtid", _GUID), ("pid", ctypes.c_uint32)]
+
+
+class _PROPVARIANT(ctypes.Structure):
+    _fields_ = [
+        ("vt", ctypes.c_uint16),
+        ("r1", ctypes.c_uint16),
+        ("r2", ctypes.c_uint16),
+        ("r3", ctypes.c_uint16),
+        ("pwszVal", ctypes.c_wchar_p),
+        ("pad", ctypes.c_uint64),
+    ]
+
+
+def apply_window_taskbar_identity(
+    win: QWidget,
+    icon_path: Optional[Path] = None,
+    exe_path: Optional[Path] = None,
+) -> None:
+    """Bind HWND property store, Win32 WM_SETICON, and Windows 11 pure-black frame."""
     try:
         hwnd = int(win.winId())
+        # 1. Windows 11 pure-black caption, rounded window corners, dark hairline border
         for attr, val in (
             (20, 1),           # DWMWA_USE_IMMERSIVE_DARK_MODE
             (33, 2),           # DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND
@@ -165,8 +193,55 @@ def enable_dark_window(win: QWidget) -> None:
             ctypes.windll.dwmapi.DwmSetWindowAttribute(
                 hwnd, attr, ctypes.byref(cval), ctypes.sizeof(cval)
             )
+
+        # 2. Explicit Win32 ICON_BIG (32x32) and ICON_SMALL (16x16) on HWND
+        if icon_path is not None and icon_path.exists():
+            u32 = ctypes.windll.user32
+            for icon_type, sz in ((1, 32), (0, 16)):
+                hicon = u32.LoadImageW(0, str(icon_path), 1, sz, sz, 0x00000010)
+                if hicon:
+                    u32.SendMessageW(hwnd, 0x0080, icon_type, hicon)  # WM_SETICON
+
+        # 3. Explicit HWND AppUserModelID + RelaunchIconResource for Windows 11 Taskbar
+        iid_ps = _GUID(0x886D8EEB, 0x8CF2, 0x4446, (ctypes.c_ubyte * 8)(0x8D, 0x02, 0xCD, 0xBA, 0x1D, 0xBD, 0xCF, 0x99))
+        fmt = _GUID(0x9F4C2855, 0x9F79, 0x4B39, (ctypes.c_ubyte * 8)(0xA8, 0xD0, 0xE1, 0xD4, 0x2D, 0xE1, 0xD5, 0xF3))
+        pps = ctypes.c_void_p()
+        hr = ctypes.windll.shell32.SHGetPropertyStoreForWindow(
+            hwnd, ctypes.byref(iid_ps), ctypes.byref(pps)
+        )
+        if hr == 0 and pps.value:
+            vtbl = ctypes.cast(
+                ctypes.cast(pps, ctypes.POINTER(ctypes.c_void_p))[0],
+                ctypes.POINTER(ctypes.c_void_p),
+            )
+            set_val = ctypes.WINFUNCTYPE(
+                ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(_PROPERTYKEY), ctypes.POINTER(_PROPVARIANT)
+            )(vtbl[6])
+            commit = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p)(vtbl[7])
+            release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtbl[2])
+
+            icon_res = f"{exe_path},0" if (exe_path and exe_path.exists()) else (str(icon_path) if icon_path else "")
+            cmd_res = str(exe_path) if (exe_path and exe_path.exists()) else ""
+            entries = [
+                (_PROPERTYKEY(fmt, 5), "QuickOCR.Desktop.App.1"),
+                (_PROPERTYKEY(fmt, 4), "QuickOCR"),
+            ]
+            if icon_res:
+                entries.append((_PROPERTYKEY(fmt, 3), icon_res))
+            if cmd_res:
+                entries.append((_PROPERTYKEY(fmt, 2), cmd_res))
+            for pk, val in entries:
+                pv = _PROPVARIANT(31, 0, 0, 0, val, 0)  # VT_LPWSTR
+                set_val(pps, ctypes.byref(pk), ctypes.byref(pv))
+            commit(pps)
+            release(pps)
     except Exception:
         pass
+
+
+def enable_dark_window(win: QWidget) -> None:
+    """Backward-compatible helper delegating to apply_window_taskbar_identity."""
+    apply_window_taskbar_identity(win)
 
 
 def _lerp_color(c1: QColor, c2: QColor, t: float) -> QColor:
@@ -180,7 +255,7 @@ def _lerp_color(c1: QColor, c2: QColor, t: float) -> QColor:
 
 
 class AnimatedButton(QPushButton):
-    """Vector anti-aliased rounded button with 60fps hover easing and crisp borders."""
+    """Vector anti-aliased rounded button with 60fps hover color/border easing."""
 
     def __init__(
         self,
@@ -193,16 +268,17 @@ class AnimatedButton(QPushButton):
     ) -> None:
         super().__init__(text, parent)
         palettes = {
-            "primary": (C_ACCENT, C_ACCENT_HOVER, C_ON_ACCENT, C_ACCENT),
-            "secondary": (C_SURFACE, C_SURFACE_HOVER, C_TEXT, C_BORDER),
-            "ghost": (C_CARD, C_SURFACE, C_MUTED, "transparent"),
-            "danger": (C_DANGER_BG, C_DANGER_HOVER, C_DANGER_FG, C_DANGER_BORDER),
+            "primary": (C_ACCENT, C_ACCENT_HOVER, C_ON_ACCENT, C_ACCENT, "#FFFFFF"),
+            "secondary": (C_SURFACE, C_SURFACE_HOVER, C_TEXT, C_BORDER, "#52525B"),
+            "ghost": (C_CARD, "#1F1F24", C_MUTED, "transparent", "#323238"),
+            "danger": (C_DANGER_BG, C_DANGER_HOVER, C_DANGER_FG, C_DANGER_BORDER, C_DANGER_BORDER_HOVER),
         }
-        bg, hover, fg, border = palettes[variant]
+        bg, hover, fg, border, border_hover = palettes[variant]
         self._bg_idle = QColor(bg)
         self._bg_hover = QColor(hover)
         self._fg = QColor(fg)
-        self._border = QColor(0, 0, 0, 0) if border == "transparent" else QColor(border)
+        self._border_idle = QColor(0, 0, 0, 0) if border == "transparent" else QColor(border)
+        self._border_hover = QColor(border_hover)
         self._radius = radius
         self._padx = padx
         self._fixed_h = height
@@ -214,7 +290,7 @@ class AnimatedButton(QPushButton):
         self.setFlat(True)
 
         self._anim = QPropertyAnimation(self, b"hoverProgress", self)
-        self._anim.setDuration(140)
+        self._anim.setDuration(190)
         self._anim.setEasingCurve(QEasingCurve.OutCubic)
 
     @Property(float)
@@ -268,16 +344,18 @@ class AnimatedButton(QPushButton):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
 
-        rect = QRectF(0.75, 0.75, self.width() - 1.5, self.height() - 1.5)
+        inset = 1.25 if self._pressed else 0.75
+        rect = QRectF(inset, inset, self.width() - inset * 2, self.height() - inset * 2)
         fill = _lerp_color(self._bg_idle, self._bg_hover, self._hover_t)
+        border = _lerp_color(self._border_idle, self._border_hover, self._hover_t)
         if not self.isEnabled():
             fill = QColor(C_SURFACE)
         elif self._pressed:
-            fill = _lerp_color(fill, QColor("#000000"), 0.14)
+            fill = _lerp_color(fill, QColor("#000000"), 0.16)
 
         p.setBrush(fill)
-        if self._border.alpha() > 0:
-            p.setPen(QPen(self._border, 1.0))
+        if border.alpha() > 0:
+            p.setPen(QPen(border, 1.0))
         else:
             p.setPen(Qt.NoPen)
         p.drawRoundedRect(rect, self._radius, self._radius)
@@ -285,8 +363,131 @@ class AnimatedButton(QPushButton):
         fg = self._fg if self.isEnabled() else QColor(C_DIM)
         p.setPen(fg)
         p.setFont(self.font())
-        text_rect = QRectF(0, 1 if self._pressed else 0, self.width(), self.height())
+        text_rect = QRectF(0, 1.2 if self._pressed else 0, self.width(), self.height())
         p.drawText(text_rect, Qt.AlignCenter, self.text())
+
+
+class TelegramBanner(QWidget):
+    """Minimal pure-black Telegram channel promo card with smooth hover animation."""
+
+    CHANNEL_URL = "https://t.me/pythash"
+
+    def __init__(self, text: str = "", parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._text = text
+        self._hover_t = 0.0
+        self._pressed = False
+        self.setFixedHeight(44)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        self._anim = QPropertyAnimation(self, b"hoverProgress", self)
+        self._anim.setDuration(200)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+
+    @Property(float)
+    def hoverProgress(self) -> float:
+        return self._hover_t
+
+    @hoverProgress.setter
+    def hoverProgress(self, val: float) -> None:
+        self._hover_t = val
+        self.update()
+
+    def setText(self, text: str) -> None:
+        self._text = text
+        self.update()
+
+    def enterEvent(self, event) -> None:
+        self._anim.stop()
+        self._anim.setStartValue(self._hover_t)
+        self._anim.setEndValue(1.0)
+        self._anim.start()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._anim.stop()
+        self._anim.setStartValue(self._hover_t)
+        self._anim.setEndValue(0.0)
+        self._anim.start()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self._pressed = True
+            self.update()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        was_pressed = self._pressed
+        self._pressed = False
+        self.update()
+        if was_pressed and event.button() == Qt.LeftButton and self.rect().contains(event.position().toPoint()):
+            QDesktopServices.openUrl(QUrl(self.CHANNEL_URL))
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, _event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+
+        w, h = float(self.width()), float(self.height())
+        is_rtl = self.layoutDirection() == Qt.RightToLeft
+
+        bg = _lerp_color(QColor("#0D0D10"), QColor("#17171C"), self._hover_t)
+        border = _lerp_color(QColor("#242429"), QColor("#52525B"), self._hover_t)
+        if self._pressed:
+            bg = _lerp_color(bg, QColor("#000000"), 0.2)
+
+        p.setBrush(bg)
+        p.setPen(QPen(border, 1.0))
+        p.drawRoundedRect(QRectF(0.75, 0.75, w - 1.5, h - 1.5), 12.0, 12.0)
+
+        # Telegram paper-plane icon badge
+        icon_cx = w - 24.0 if is_rtl else 24.0
+        icon_cy = h / 2.0
+        badge_bg = _lerp_color(QColor("#1A1A20"), QColor("#272730"), self._hover_t)
+        p.setPen(Qt.NoPen)
+        p.setBrush(badge_bg)
+        p.drawEllipse(QPointF(icon_cx, icon_cy), 13.0, 13.0)
+
+        plane = QPainterPath()
+        plane.moveTo(icon_cx - 6.0, icon_cy + 0.5)
+        plane.lineTo(icon_cx + 6.5, icon_cy - 5.0)
+        plane.lineTo(icon_cx + 4.2, icon_cy + 5.5)
+        plane.lineTo(icon_cx + 0.3, icon_cy + 2.5)
+        plane.lineTo(icon_cx - 2.0, icon_cy + 4.4)
+        plane.lineTo(icon_cx - 1.8, icon_cy + 1.5)
+        plane.closeSubpath()
+        p.setBrush(QColor("#FAFAFA"))
+        p.drawPath(plane)
+
+        # @pythash pill on opposite edge
+        pill_w, pill_h = 84.0, 24.0
+        pill_x = 12.0 if is_rtl else (w - pill_w - 12.0)
+        pill_y = (h - pill_h) / 2.0
+        pill_fill = _lerp_color(QColor("#1C1C22"), QColor("#FAFAFA"), self._hover_t)
+        pill_fg = _lerp_color(QColor("#E4E4E7"), QColor("#09090B"), self._hover_t)
+        p.setBrush(pill_fill)
+        p.setPen(QPen(QColor("#32323A"), 1.0) if self._hover_t < 0.5 else Qt.NoPen)
+        p.drawRoundedRect(QRectF(pill_x, pill_y, pill_w, pill_h), 12.0, 12.0)
+
+        p.setPen(pill_fg)
+        p.setFont(QFont("Consolas", 8, QFont.Bold))
+        nudge = 1.5 * self._hover_t * (-1 if is_rtl else 1)
+        p.drawText(QRectF(pill_x + nudge, pill_y, pill_w, pill_h), Qt.AlignCenter, "\u202a@pythash ↗\u202c")
+
+        # Promo copy cleanly centered/aligned between icon and pill
+        p.setPen(QColor(C_TEXT))
+        f = QFont(self.font())
+        f.setPointSize(8)
+        f.setWeight(QFont.Medium)
+        p.setFont(f)
+        if is_rtl:
+            txt_rect = QRectF(pill_x + pill_w + 10.0, 0.0, w - 44.0 - (pill_x + pill_w + 10.0), h)
+            p.drawText(txt_rect, Qt.AlignVCenter | Qt.AlignRight, self._text)
+        else:
+            txt_rect = QRectF(44.0, 0.0, pill_x - 54.0, h)
+            p.drawText(txt_rect, Qt.AlignVCenter | Qt.AlignLeft, self._text)
 
 
 class AnimatedToggle(QAbstractButton):
@@ -301,7 +502,7 @@ class AnimatedToggle(QAbstractButton):
         self._pos = 1.0 if checked else 0.0
 
         self._anim = QPropertyAnimation(self, b"thumbPos", self)
-        self._anim.setDuration(160)
+        self._anim.setDuration(210)
         self._anim.setEasingCurve(QEasingCurve.OutCubic)
         self.toggled.connect(self._on_toggled)
 
@@ -353,6 +554,8 @@ class ToggleRow(QWidget):
         on_change: Callable[[bool], None],
         parent: Optional[QWidget] = None,
     ) -> None:
+        from PySide6.QtWidgets import QHBoxLayout, QLabel
+
         super().__init__(parent)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 2, 0, 2)
@@ -378,7 +581,7 @@ class ToggleRow(QWidget):
 
 
 class AnimatedSegmented(QWidget):
-    """Multi-option rounded pill selector with sliding white indicator."""
+    """Multi-option rounded pill selector with 60fps sliding white indicator."""
 
     def __init__(
         self,
@@ -402,7 +605,7 @@ class AnimatedSegmented(QWidget):
         self.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
 
         self._anim = QPropertyAnimation(self, b"pillPos", self)
-        self._anim.setDuration(180)
+        self._anim.setDuration(230)
         self._anim.setEasingCurve(QEasingCurve.OutCubic)
 
     @Property(float)
@@ -426,10 +629,6 @@ class AnimatedSegmented(QWidget):
     def update_labels(self, labels: Sequence[str]) -> None:
         self._items = [(val, lbl) for (val, _), lbl in zip(self._items, labels)]
         self.updateGeometry()
-        self.update()
-
-    def _sync_pos_immediately(self) -> None:
-        self._pos = float(self._idx)
         self.update()
 
     def set_value(self, value: str) -> None:
@@ -474,12 +673,10 @@ class AnimatedSegmented(QWidget):
         seg_w = (w - 6.0) / n
         is_rtl = self.layoutDirection() == Qt.RightToLeft
 
-        # Outer pill track
         p.setBrush(QColor(C_SURFACE))
         p.setPen(QPen(QColor(C_BORDER), 1.0))
         p.drawRoundedRect(QRectF(0.5, 0.5, w - 1.0, h - 1.0), 10, 10)
 
-        # Map logical self._pos -> visual horizontal position
         vis_pos = ((n - 1.0) - self._pos) if is_rtl else self._pos
         pill_x = 3.0 + vis_pos * seg_w
         p.setPen(Qt.NoPen)
@@ -501,7 +698,7 @@ class AnimatedSegmented(QWidget):
 
 
 class FloatingToast(QWidget):
-    """Non-focus-stealing rounded floating pill with 60fps spinner & fade slide."""
+    """Non-focus-stealing rounded floating pill with 60fps spinner & slide-fade."""
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(
@@ -513,7 +710,7 @@ class FloatingToast(QWidget):
         )
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        self.setFixedSize(292, 44)
+        self.setFixedSize(296, 46)
 
         self._mode = "idle"
         self._msg = ""
@@ -532,11 +729,11 @@ class FloatingToast(QWidget):
         self._hide_timer.timeout.connect(self._fade_out)
 
         self._pos_anim = QPropertyAnimation(self, b"pos", self)
-        self._pos_anim.setDuration(200)
+        self._pos_anim.setDuration(220)
         self._pos_anim.setEasingCurve(QEasingCurve.OutCubic)
 
         self._op_anim = QPropertyAnimation(self, b"windowOpacity", self)
-        self._op_anim.setDuration(200)
+        self._op_anim.setDuration(220)
         self._op_anim.setEasingCurve(QEasingCurve.OutCubic)
         self._op_anim.finished.connect(self._on_op_anim_finished)
 
@@ -563,11 +760,11 @@ class FloatingToast(QWidget):
 
         if not self.isVisible():
             self.setWindowOpacity(0.0)
-            self.move(self._target_x, self._target_y - 12)
+            self.move(self._target_x, self._target_y - 20)
             self.show()
             self._animate_in()
         else:
-            self.setWindowOpacity(0.96)
+            self.setWindowOpacity(0.97)
             self.move(self._target_x, self._target_y)
 
         self._spin_timer.start()
@@ -585,20 +782,20 @@ class FloatingToast(QWidget):
 
         if not self.isVisible():
             self.setWindowOpacity(0.0)
-            self.move(self._target_x, self._target_y - 12)
+            self.move(self._target_x, self._target_y - 20)
             self.show()
             self._animate_in()
         else:
-            self.setWindowOpacity(0.96)
+            self.setWindowOpacity(0.97)
             self.move(self._target_x, self._target_y)
 
         self.update()
-        self._hide_timer.start(1450)
+        self._hide_timer.start(1600)
 
     def _animate_in(self) -> None:
         self._fading_out = False
         self._op_anim.setStartValue(self.windowOpacity())
-        self._op_anim.setEndValue(0.96)
+        self._op_anim.setEndValue(0.97)
         self._op_anim.start()
 
         self._pos_anim.setStartValue(self.pos())
@@ -612,45 +809,42 @@ class FloatingToast(QWidget):
         self._op_anim.start()
 
         self._pos_anim.setStartValue(self.pos())
-        self._pos_anim.setEndValue(QPointF(self._target_x, self._target_y - 10).toPoint())
+        self._pos_anim.setEndValue(QPointF(self._target_x, self._target_y - 16).toPoint())
         self._pos_anim.start()
 
     def _tick_spin(self) -> None:
-        self._angle = (self._angle - 9) % 360
+        self._angle = (self._angle - 10) % 360
         self.update()
 
     def paintEvent(self, _event) -> None:
+        from PySide6.QtGui import QGuiApplication
+
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
 
         rect = QRectF(1.0, 1.0, self.width() - 2.0, self.height() - 2.0)
         p.setBrush(QColor("#0B0B0D"))
-        p.setPen(QPen(QColor("#2E2E32"), 1.0))
-        p.drawRoundedRect(rect, 21.0, 21.0)
-
-        from PySide6.QtGui import QGuiApplication
+        p.setPen(QPen(QColor("#323238"), 1.0))
+        p.drawRoundedRect(rect, 22.0, 22.0)
 
         is_rtl = QGuiApplication.layoutDirection() == Qt.RightToLeft
-
         cy = self.height() / 2.0
         if self._mode == "loading":
             arc_rect = QRectF(18.0, cy - 7.0, 14.0, 14.0)
             p.setPen(QPen(QColor("#27272A"), 2.0))
             p.drawEllipse(arc_rect)
-            pen = QPen(QColor(C_ACCENT), 2.0, Qt.SolidLine, Qt.RoundCap)
+            pen = QPen(QColor(C_ACCENT), 2.2, Qt.SolidLine, Qt.RoundCap)
             p.setPen(pen)
-            p.drawArc(arc_rect, self._angle * 16, 115 * 16)
+            p.drawArc(arc_rect, self._angle * 16, 120 * 16)
         else:
             dot = QColor(C_OK if self._mode == "ok" else C_WARN)
             p.setPen(Qt.NoPen)
             p.setBrush(dot)
             p.drawEllipse(QRectF(20.0, cy - 4.5, 9.0, 9.0))
 
-        p.setPen(QColor(C_TEXT))
         f = QFont(self.font())
         f.setPointSize(9)
         f.setWeight(QFont.DemiBold)
-        p.setFont(f)
 
         if is_rtl:
             text_left = 40.0

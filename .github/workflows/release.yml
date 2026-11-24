@@ -15,11 +15,26 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Compile QuickOCR launcher
+      - name: Fetch non-MSIX Python 3.11 host runtime
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path "runtime" | Out-Null
+          Invoke-WebRequest -Uri "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip" -OutFile "runtime\py311.zip" -UseBasicParsing
+          Expand-Archive -Path "runtime\py311.zip" -DestinationPath "runtime" -Force
+          Remove-Item "runtime\py311.zip"
+          @"
+          python311.zip
+          .
+          ..
+          ..\.venv\Lib\site-packages
+          import site
+          "@ | Set-Content -Path "runtime\python311._pth" -Encoding ASCII
+
+      - name: Compile QuickOCR x64 launcher
         shell: powershell
         run: |
           $csc = "$env:SystemRoot\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-          & $csc /nologo /target:winexe /win32icon:"icon.ico" /reference:System.Windows.Forms.dll /out:"QuickOCR.exe" "launcher.cs"
+          & $csc /nologo /target:winexe /platform:x64 /win32icon:"icon.ico" /reference:System.Windows.Forms.dll /out:"QuickOCR.exe" "launcher.cs"
 
       - name: Package release archive
         shell: powershell
@@ -32,7 +47,7 @@ jobs:
             "models_dialog.py", "i18n.py", "check_ocr.py", "launcher.cs",
             "QuickOCR.exe", "QuickOCR.bat", "Setup.bat", "Uninstall.bat",
             "requirements.txt", "icon.ico", "README.md", "LICENSE",
-            "assets", "models"
+            "assets", "models", "runtime"
           )
           foreach ($it in $items) {
             Copy-Item -Path $it -Destination (Join-Path $stage $it) -Recurse -Force

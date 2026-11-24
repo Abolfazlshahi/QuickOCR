@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import math
 import os
 import subprocess
 import sys
@@ -16,7 +17,16 @@ import winsound
 import keyboard
 import pyperclip
 from PIL import Image, ImageGrab
-from PySide6.QtCore import QEasingCurve, QObject, QPropertyAnimation, Qt, Signal
+from PySide6.QtCore import (
+    QEasingCurve,
+    QObject,
+    QParallelAnimationGroup,
+    QPoint,
+    QPropertyAnimation,
+    Qt,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
@@ -51,8 +61,9 @@ from ui_kit import (
     AnimatedButton,
     AnimatedSegmented,
     FloatingToast,
+    TelegramBanner,
     ToggleRow,
-    enable_dark_window,
+    apply_window_taskbar_identity,
     load_app_fonts,
 )
 
@@ -169,23 +180,42 @@ class _Bridge(QObject):
 
 
 class StatusDot(QWidget):
-    """Crisp anti-aliased circular status dot."""
+    """Crisp anti-aliased circular status dot with subtle 60fps breathing halo."""
 
     def __init__(self, color: str = C_MUTED, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._color = QColor(color)
-        self.setFixedSize(10, 10)
+        self._breathing = False
+        self._phase = 0.0
+        self.setFixedSize(14, 14)
+        self._timer = QTimer(self)
+        self._timer.setInterval(33)
+        self._timer.timeout.connect(self._tick)
 
-    def setColor(self, color: str) -> None:
+    def setColor(self, color: str, breathe: bool = False) -> None:
         self._color = QColor(color)
+        self._breathing = breathe
+        if breathe and not self._timer.isActive():
+            self._timer.start()
+        elif not breathe and self._timer.isActive():
+            self._timer.stop()
+        self.update()
+
+    def _tick(self) -> None:
+        self._phase = (self._phase + 0.1) % (2.0 * math.pi)
         self.update()
 
     def paintEvent(self, _event) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setPen(Qt.NoPen)
+        if self._breathing:
+            halo_alpha = int(40 + 45 * (0.5 + 0.5 * math.sin(self._phase)))
+            halo = QColor(self._color.red(), self._color.green(), self._color.blue(), halo_alpha)
+            p.setBrush(halo)
+            p.drawEllipse(1, 1, 12, 12)
         p.setBrush(self._color)
-        p.drawEllipse(1, 1, 8, 8)
+        p.drawEllipse(3, 3, 8, 8)
 
 
 class QuickOCRWindow(QWidget):
@@ -217,8 +247,9 @@ class QuickOCRWindow(QWidget):
         self.setObjectName("MainRoot")
         self.setWindowTitle("QuickOCR")
         self.setWindowIcon(self.app_icon)
-        self.resize(495, 675)
+        self.resize(495, 688)
         self.setMinimumSize(390, 480)
+        apply_window_taskbar_identity(self, ICON_PATH, EXE_LAUNCHER)
 
         self.bridge = _Bridge()
         self.bridge.hotkey_fired.connect(self._open_snip_overlay)
@@ -227,8 +258,16 @@ class QuickOCRWindow(QWidget):
         self.bridge.ocr_error.connect(self._handle_ocr_error)
 
         self._fade_anim = QPropertyAnimation(self, b"windowOpacity", self)
-        self._fade_anim.setDuration(150)
+        self._fade_anim.setDuration(240)
         self._fade_anim.setEasingCurve(QEasingCurve.OutCubic)
+
+        self._slide_anim = QPropertyAnimation(self, b"pos", self)
+        self._slide_anim.setDuration(240)
+        self._slide_anim.setEasingCurve(QEasingCurve.OutCubic)
+
+        self._show_group = QParallelAnimationGroup(self)
+        self._show_group.addAnimation(self._fade_anim)
+        self._show_group.addAnimation(self._slide_anim)
 
         self.toast = FloatingToast()
 
@@ -273,8 +312,8 @@ class QuickOCRWindow(QWidget):
         scroll.setWidget(body)
 
         root_col = QVBoxLayout(body)
-        root_col.setContentsMargins(18, 14, 18, 8)
-        root_col.setSpacing(10)
+        root_col.setContentsMargins(18, 12, 18, 6)
+        root_col.setSpacing(8)
 
         # --- Header ---
         hdr = QHBoxLayout()
@@ -303,6 +342,10 @@ class QuickOCRWindow(QWidget):
         hdr.addWidget(self.folder_btn)
         root_col.addLayout(hdr)
 
+        # --- Telegram Channel Promo Banner ---
+        self.tg_banner = TelegramBanner()
+        root_col.addWidget(self.tg_banner)
+
         # --- Hero Action Buttons ---
         hero = QHBoxLayout()
         hero.setSpacing(10)
@@ -324,8 +367,8 @@ class QuickOCRWindow(QWidget):
         cfg_card = QFrame()
         cfg_card.setObjectName("Card")
         cfg_col = QVBoxLayout(cfg_card)
-        cfg_col.setContentsMargins(14, 11, 14, 11)
-        cfg_col.setSpacing(8)
+        cfg_col.setContentsMargins(14, 8, 14, 8)
+        cfg_col.setSpacing(5)
 
         # Language row
         lang_row = QHBoxLayout()
@@ -452,8 +495,8 @@ class QuickOCRWindow(QWidget):
         res_card.setObjectName("Card")
         res_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         res_col = QVBoxLayout(res_card)
-        res_col.setContentsMargins(14, 11, 14, 11)
-        res_col.setSpacing(8)
+        res_col.setContentsMargins(14, 9, 14, 9)
+        res_col.setSpacing(6)
 
         res_hdr = QHBoxLayout()
         res_hdr.setSpacing(8)
@@ -476,7 +519,7 @@ class QuickOCRWindow(QWidget):
 
         self.preview_edit = QTextEdit()
         self.preview_edit.setObjectName("PreviewEdit")
-        self.preview_edit.setMinimumHeight(68)
+        self.preview_edit.setMinimumHeight(48)
         self.preview_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         res_col.addWidget(self.preview_edit, 1)
 
@@ -549,6 +592,7 @@ class QuickOCRWindow(QWidget):
             self._t("status_ready") if self._model_ready else self._t("status_loading_model")
         )
         self.folder_btn.setText(self._t("btn_open_folder"))
+        self.tg_banner.setText(self._t("tg_promo"))
         self.snip_btn.setText(self._t("btn_snip"))
         self.clip_btn.setText(self._t("btn_clipboard"))
         self.lang_lbl.setText(self._t("lbl_language"))
@@ -612,7 +656,7 @@ class QuickOCRWindow(QWidget):
 
     def _on_warmup_done(self, ok: bool, msg_or_key: str) -> None:
         self._model_ready = ok
-        self.status_dot.setColor(C_OK if ok else C_MUTED)
+        self.status_dot.setColor(C_OK if ok else C_MUTED, breathe=ok)
         text = self._t(msg_or_key) if msg_or_key.startswith("status_") else msg_or_key
         self.model_lbl.setText(text)
 
@@ -879,17 +923,21 @@ class QuickOCRWindow(QWidget):
             self.show_window()
 
     def show_window(self) -> None:
-        self._fade_anim.stop()
+        self._show_group.stop()
         if not self.isVisible():
             self.setWindowOpacity(0.0)
             self.show()
-            enable_dark_window(self)
+            apply_window_taskbar_identity(self, ICON_PATH, EXE_LAUNCHER)
+            target_pos = self.pos()
+            self.move(target_pos + QPoint(0, 18))
             self._fade_anim.setStartValue(0.0)
             self._fade_anim.setEndValue(1.0)
-            self._fade_anim.start()
+            self._slide_anim.setStartValue(target_pos + QPoint(0, 18))
+            self._slide_anim.setEndValue(target_pos)
+            self._show_group.start()
         else:
             self.setWindowState((self.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
-            enable_dark_window(self)
+            apply_window_taskbar_identity(self, ICON_PATH, EXE_LAUNCHER)
         self.raise_()
         self.activateWindow()
 
