@@ -1,0 +1,48 @@
+name: Release QuickOCR
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compile QuickOCR launcher
+        shell: powershell
+        run: |
+          $csc = "$env:SystemRoot\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          & $csc /nologo /target:winexe /win32icon:"icon.ico" /reference:System.Windows.Forms.dll /out:"QuickOCR.exe" "launcher.cs"
+
+      - name: Package release archive
+        shell: powershell
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $stage = Join-Path $env:RUNNER_TEMP "QuickOCR"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          $items = @(
+            "app.py", "ui_kit.py", "snipper.py", "ocr_engine.py",
+            "models_dialog.py", "i18n.py", "check_ocr.py", "launcher.cs",
+            "QuickOCR.exe", "QuickOCR.bat", "Setup.bat", "Uninstall.bat",
+            "requirements.txt", "icon.ico", "README.md", "LICENSE",
+            "assets", "models"
+          )
+          foreach ($it in $items) {
+            Copy-Item -Path $it -Destination (Join-Path $stage $it) -Recurse -Force
+          }
+          Compress-Archive -Path $stage -DestinationPath "QuickOCR-$tag-Windows.zip" -Force
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: powershell
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          gh release create "$tag" "QuickOCR-$tag-Windows.zip" --title "QuickOCR $tag" --generate-notes
