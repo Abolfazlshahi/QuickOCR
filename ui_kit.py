@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 from pathlib import Path
+import sys
 from typing import Callable, Optional, Sequence, Tuple
 
 from PySide6.QtCore import (
@@ -71,7 +72,7 @@ QScrollArea, QScrollArea > QWidget > QWidget {{
 QScrollBar:vertical {{
     background: transparent;
     width: 6px;
-    margin: 2px 0;
+    margin: 4px 2px;
 }}
 QScrollBar::handle:vertical {{
     background: #27272A;
@@ -183,6 +184,8 @@ def apply_window_taskbar_identity(
     exe_path: Optional[Path] = None,
 ) -> None:
     """Bind HWND property store, Win32 WM_SETICON, and Windows 11 pure-black frame."""
+    if sys.platform != "win32":
+        return
     try:
         hwnd = int(win.winId())
         # 1. Windows 11 pure-black caption, rounded window corners, dark hairline border
@@ -270,6 +273,22 @@ class AnimatedButton(QPushButton):
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(text, parent)
+        self._hover_t = 0.0
+        self._pressed = False
+        self._radius = radius
+        self._padx = padx
+        self._fixed_h = height
+        self.setVariant(variant)
+
+        self.setFixedHeight(height)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFlat(True)
+
+        self._anim = QPropertyAnimation(self, b"hoverProgress", self)
+        self._anim.setDuration(190)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+
+    def setVariant(self, variant: str) -> None:
         palettes = {
             "primary": (C_ACCENT, C_ACCENT_HOVER, C_ON_ACCENT, C_ACCENT, "#FFFFFF"),
             "secondary": (C_SURFACE, C_SURFACE_HOVER, C_TEXT, C_BORDER, "#52525B"),
@@ -282,19 +301,7 @@ class AnimatedButton(QPushButton):
         self._fg = QColor(fg)
         self._border_idle = QColor(0, 0, 0, 0) if border == "transparent" else QColor(border)
         self._border_hover = QColor(border_hover)
-        self._radius = radius
-        self._padx = padx
-        self._fixed_h = height
-        self._hover_t = 0.0
-        self._pressed = False
-
-        self.setFixedHeight(height)
-        self.setCursor(Qt.PointingHandCursor)
-        self.setFlat(True)
-
-        self._anim = QPropertyAnimation(self, b"hoverProgress", self)
-        self._anim.setDuration(190)
-        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+        self.update()
 
     @Property(float)
     def hoverProgress(self) -> float:

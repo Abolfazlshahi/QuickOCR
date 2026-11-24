@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import io
 import json
 import math
 import os
@@ -12,13 +13,18 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-import winsound
+try:
+    import winsound  # type: ignore
+except ImportError:
+    winsound = None  # type: ignore
 
 import keyboard
 import pyperclip
 from PIL import Image, ImageGrab
 from PySide6.QtCore import (
+    QBuffer,
     QEasingCurve,
+    QIODevice,
     QObject,
     QParallelAnimationGroup,
     QPoint,
@@ -37,6 +43,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMenu,
     QMessageBox,
+    QProgressBar,
     QScrollArea,
     QSizePolicy,
     QSystemTrayIcon,
@@ -46,6 +53,7 @@ from PySide6.QtWidgets import (
 )
 
 import ocr_engine
+import updater
 from i18n import LANGUAGES, tr
 from models_dialog import ModelsView
 from snipper import SnipOverlay, make_app_icon
@@ -91,10 +99,39 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 
 def set_app_user_model_id() -> None:
     """Bind process to a dedicated Windows AppUserModelID so Taskbar uses QuickOCR's icon."""
+    if sys.platform != "win32":
+        return
     try:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("QuickOCR.Desktop.App.1")
     except Exception:
         pass
+
+
+def _open_app_folder() -> None:
+    if sys.platform == "win32":
+        os.startfile(str(BASE_DIR))
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", str(BASE_DIR)])
+    else:
+        subprocess.Popen(["xdg-open", str(BASE_DIR)])
+
+
+def _play_beep(ok: bool = True) -> None:
+    if sys.platform == "win32" and winsound is not None:
+        if ok:
+            try:
+                winsound.Beep(1050, 80)
+            except RuntimeError:
+                winsound.MessageBeep(winsound.MB_OK)
+        else:
+            winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+    else:
+        QApplication.beep()
+
+
+def _parse_ipc_command(payload: bytes) -> str:
+    cmd = payload.decode("utf-8", errors="ignore").strip().upper()
+    return "SNIP" if cmd == "SNIP" else "SHOW"
 
 
 def load_config() -> Dict[str, Any]:
@@ -122,6 +159,11 @@ def get_startup_shortcut_path() -> Path:
     return appdata / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "QuickOCR.lnk"
 
 
+def get_linux_autostart_path() -> Path:
+    xdg_cfg = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return xdg_cfg / "autostart" / "quickocr.desktop"
+
+
 def create_windows_shortcut(
     lnk_path: Path,
     target: Path,
@@ -145,32 +187,55 @@ def create_windows_shortcut(
     subprocess.run(
         ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps],
         check=True,
-        creationflags=subprocess.CREATE_NO_WINDOW,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
 
 
 def is_autostart_enabled() -> bool:
-    return get_startup_shortcut_path().exists()
+    if sys.platform == "win32":
+        return get_startup_shortcut_path().exists()
+    return get_linux_autostart_path().exists()
 
 
 def set_autostart(enabled: bool) -> None:
-    lnk = get_startup_shortcut_path()
+    if sys.platform == "win32":
+        lnk = get_startup_shortcut_path()
+        if enabled:
+            lnk.parent.mkdir(parents=True, exist_ok=True)
+            if EXE_LAUNCHER.exists():
+                target, args = EXE_LAUNCHER, "--minimized"
+            else:
+                target = PYTHONW_EXE if PYTHONW_EXE.exists() else Path(sys.executable)
+                args = f'"{APP_SCRIPT}" --minimized'
+            create_windows_shortcut(
+                lnk_path=lnk,
+                target=target,
+                arguments=args,
+                workdir=BASE_DIR,
+                icon_path=ICON_PATH,
+            )
+        elif lnk.exists():
+            lnk.unlink()
+        return
+
+    desktop_file = get_linux_autostart_path()
     if enabled:
-        lnk.parent.mkdir(parents=True, exist_ok=True)
-        if EXE_LAUNCHER.exists():
-            target, args = EXE_LAUNCHER, "--minimized"
-        else:
-            target = PYTHONW_EXE if PYTHONW_EXE.exists() else Path(sys.executable)
-            args = f'"{APP_SCRIPT}" --minimized'
-        create_windows_shortcut(
-            lnk_path=lnk,
-            target=target,
-            arguments=args,
-            workdir=BASE_DIR,
-            icon_path=ICON_PATH,
+        desktop_file.parent.mkdir(parents=True, exist_ok=True)
+        sh_path = BASE_DIR / "QuickOCR.sh"
+        exec_cmd = f'"{sh_path}" --minimized' if sh_path.exists() else f'"{sys.executable}" "{APP_SCRIPT}" --minimized'
+        desktop_file.write_text(
+            "[Desktop Entry]\n"
+            "Type=Application\n"
+            "Name=QuickOCR\n"
+            f"Exec={exec_cmd}\n"
+            f"Path={BASE_DIR}\n"
+            f"Icon={LOGO_PATH}\n"
+            "Terminal=false\n"
+            "X-GNOME-Autostart-enabled=true\n",
+            encoding="utf-8",
         )
-    elif lnk.exists():
-        lnk.unlink()
+    elif desktop_file.exists():
+        desktop_file.unlink()
 
 
 class _Bridge(QObject):
@@ -178,6 +243,9 @@ class _Bridge(QObject):
     warmup_done = Signal(bool, str)
     ocr_done = Signal(str, int)
     ocr_error = Signal(str)
+    update_checked = Signal(bool, object, str)
+    update_progress = Signal(int, str)
+    update_done = Signal(bool, object, str)
 
 
 class StatusDot(QWidget):
@@ -240,6 +308,8 @@ class QuickOCRWindow(QWidget):
         self._snip_overlay: Optional[SnipOverlay] = None
         self._status_key = "status_bg_ready"
         self._last_elapsed_ms: Optional[int] = None
+        self._available_release: Optional[updater.ReleaseInfo] = None
+        self._update_busy = False
 
         make_app_icon(ICON_PATH, LOGO_PATH)
         self.app_icon = QIcon(str(ICON_PATH))
@@ -248,8 +318,8 @@ class QuickOCRWindow(QWidget):
         self.setObjectName("MainRoot")
         self.setWindowTitle("QuickOCR")
         self.setWindowIcon(self.app_icon)
-        self.resize(495, 688)
-        self.setMinimumSize(390, 480)
+        self.resize(495, 708)
+        self.setMinimumSize(390, 500)
         apply_window_taskbar_identity(self, ICON_PATH, EXE_LAUNCHER)
 
         self.bridge = _Bridge()
@@ -257,6 +327,9 @@ class QuickOCRWindow(QWidget):
         self.bridge.warmup_done.connect(self._on_warmup_done)
         self.bridge.ocr_done.connect(self._handle_ocr_success)
         self.bridge.ocr_error.connect(self._handle_ocr_error)
+        self.bridge.update_checked.connect(self._on_update_checked)
+        self.bridge.update_progress.connect(self._on_update_progress)
+        self.bridge.update_done.connect(self._on_update_done)
 
         self._fade_anim = QPropertyAnimation(self, b"windowOpacity", self)
         self._fade_anim.setDuration(240)
@@ -293,6 +366,10 @@ class QuickOCRWindow(QWidget):
             )
 
         threading.Thread(target=self._warmup_worker, daemon=True).start()
+        self._update_check_timer = QTimer(self)
+        self._update_check_timer.setSingleShot(True)
+        self._update_check_timer.timeout.connect(lambda: self._start_update_check(manual=False))
+        self._update_check_timer.start(1500)
 
     def _t(self, key: str, **kwargs: str) -> str:
         return tr(self.lang, key, **kwargs)
@@ -351,7 +428,7 @@ class QuickOCRWindow(QWidget):
         self.folder_btn = AnimatedButton(
             "", variant="ghost", radius=9, height=30, padx=12
         )
-        self.folder_btn.clicked.connect(lambda: os.startfile(str(BASE_DIR)))
+        self.folder_btn.clicked.connect(_open_app_folder)
         hdr.addWidget(self.folder_btn)
         root_col.addLayout(hdr)
 
@@ -561,6 +638,38 @@ class QuickOCRWindow(QWidget):
         status_row.addWidget(self.hk_pill)
         footer_col.addLayout(status_row)
 
+        upd_row = QHBoxLayout()
+        upd_row.setSpacing(8)
+        self.ver_lbl = QLabel(f"\u202av{updater.APP_VERSION}\u202c")
+        self.ver_lbl.setLayoutDirection(Qt.LeftToRight)
+        self.ver_lbl.setStyleSheet(
+            f"background: {C_SURFACE}; color: {C_MUTED}; border: 1px solid #242426; "
+            "border-radius: 6px; padding: 1px 7px; font-family: Consolas; font-size: 7.5pt;"
+        )
+        upd_row.addWidget(self.ver_lbl)
+
+        self.update_status_lbl = QLabel("")
+        self.update_status_lbl.setStyleSheet(f"color: {C_DIM}; font-size: 8pt; background: transparent;")
+        self.update_status_lbl.setMinimumWidth(10)
+        upd_row.addWidget(self.update_status_lbl, 1)
+
+        self.update_btn = AnimatedButton("", variant="ghost", radius=8, height=26, padx=10)
+        self.update_btn.clicked.connect(self._on_update_clicked)
+        upd_row.addWidget(self.update_btn)
+        footer_col.addLayout(upd_row)
+
+        self.update_progress = QProgressBar()
+        self.update_progress.setRange(0, 100)
+        self.update_progress.setValue(0)
+        self.update_progress.setTextVisible(False)
+        self.update_progress.setFixedHeight(4)
+        self.update_progress.setStyleSheet(
+            "QProgressBar { background: #1F1F23; border: none; border-radius: 2px; }"
+            "QProgressBar::chunk { background: #FAFAFA; border-radius: 2px; }"
+        )
+        self.update_progress.hide()
+        footer_col.addWidget(self.update_progress)
+
         foot = QHBoxLayout()
         foot.setSpacing(10)
         self.hide_btn = AnimatedButton("", variant="secondary", radius=10, height=34, padx=16)
@@ -635,6 +744,7 @@ class QuickOCRWindow(QWidget):
         self.hide_btn.setText(self._t("btn_hide"))
         self.quit_btn.setText(self._t("btn_quit"))
         self.status_lbl.setText(self._t(self._status_key))
+        self._refresh_update_button()
 
         if hasattr(self, "models_view"):
             self.models_view.refresh_language(lang)
@@ -657,6 +767,103 @@ class QuickOCRWindow(QWidget):
         self._refresh_model_pill()
         self._set_status("status_model_switched")
         threading.Thread(target=self._warmup_worker, daemon=True).start()
+
+    # --- GitHub Auto-Updater ---
+
+    def _refresh_update_button(self) -> None:
+        if self._available_release is not None:
+            self.update_btn.setText(self._t("btn_install_update", ver=self._available_release.tag))
+            self.update_btn.setVariant("primary")
+            if not self._update_busy:
+                self.update_status_lbl.setText(
+                    self._t("msg_update_avail", ver=self._available_release.tag)
+                )
+        else:
+            self.update_btn.setText(self._t("btn_check_update"))
+            self.update_btn.setVariant("ghost")
+
+    def _on_update_clicked(self) -> None:
+        if self._update_busy:
+            return
+        if self._available_release is not None:
+            self._start_update_install()
+        else:
+            self._start_update_check(manual=True)
+
+    def _start_update_check(self, manual: bool = True) -> None:
+        if self._update_busy:
+            return
+        if manual:
+            self._update_busy = True
+            self.update_btn.setEnabled(False)
+            self.update_status_lbl.setText(self._t("msg_checking_update"))
+
+        def worker() -> None:
+            try:
+                rel = updater.check_latest_release(updater.APP_VERSION)
+                self.bridge.update_checked.emit(manual, rel, "")
+            except Exception as exc:
+                self.bridge.update_checked.emit(manual, None, str(exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_update_checked(self, manual: bool, release: Any, err: str) -> None:
+        if manual:
+            self._update_busy = False
+            self.update_btn.setEnabled(True)
+        if err:
+            if manual:
+                self.update_status_lbl.setText(f"{self._t('msg_update_err')}: {err[:45]}")
+            return
+        if release is not None:
+            self._available_release = release
+            self._refresh_update_button()
+        elif manual:
+            self._available_release = None
+            self._refresh_update_button()
+            self.update_status_lbl.setText(
+                self._t("msg_up_to_date", ver=f"v{updater.APP_VERSION}")
+            )
+
+    def _start_update_install(self) -> None:
+        if self._update_busy or self._available_release is None:
+            return
+        release = self._available_release
+        self._update_busy = True
+        self.update_btn.setEnabled(False)
+        self.update_progress.setValue(0)
+        self.update_progress.show()
+        self.update_status_lbl.setText(self._t("msg_update_downloading", pct="0"))
+
+        def worker() -> None:
+            try:
+                restart_fn = updater.apply_update_and_prepare_restart(
+                    release,
+                    BASE_DIR,
+                    on_progress=lambda p, m: self.bridge.update_progress.emit(p, m),
+                )
+                self.bridge.update_done.emit(True, restart_fn, "")
+            except Exception as exc:
+                self.bridge.update_done.emit(False, None, str(exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_update_progress(self, pct: int, _detail: str) -> None:
+        if not self._update_busy:
+            return
+        self.update_progress.setValue(pct)
+        self.update_status_lbl.setText(self._t("msg_update_downloading", pct=str(pct)))
+
+    def _on_update_done(self, ok: bool, restart_fn: Any, err: str) -> None:
+        self._update_busy = False
+        self.update_btn.setEnabled(True)
+        self.update_progress.hide()
+        if ok and callable(restart_fn):
+            self.update_status_lbl.setText(self._t("msg_update_applying"))
+            self.quit_app()
+            restart_fn()
+        elif err:
+            self.update_status_lbl.setText(f"{self._t('msg_update_err')}: {err[:55]}")
 
     # --- Warmup & IPC ---
 
@@ -682,13 +889,20 @@ class QuickOCRWindow(QWidget):
     def _on_ipc_connection(self) -> None:
         if self.ipc_server is None:
             return
+        action = "SHOW"
         while self.ipc_server.hasPendingConnections():
             sock = self.ipc_server.nextPendingConnection()
             if sock is not None:
                 sock.waitForReadyRead(100)
+                data = bytes(sock.readAll())
+                if data:
+                    action = _parse_ipc_command(data)
                 sock.close()
                 sock.deleteLater()
-        self.show_window()
+        if action == "SNIP":
+            QTimer.singleShot(50, self._open_snip_overlay)
+        else:
+            self.show_window()
 
     # --- Settings & Hotkey ---
 
@@ -818,26 +1032,29 @@ class QuickOCRWindow(QWidget):
     def _trigger_clipboard_ocr(self) -> None:
         if self._ocr_busy:
             return
+        image: Optional[Image.Image] = None
         try:
             clip = ImageGrab.grabclipboard()
-        except Exception as exc:
-            self.status_lbl.setText(f"{self._t('status_error')}: {exc}")
-            return
-
-        image: Optional[Image.Image] = None
-        if isinstance(clip, Image.Image):
-            image = clip
-        elif isinstance(clip, list) and clip:
-            try:
+            if isinstance(clip, Image.Image):
+                image = clip
+            elif isinstance(clip, list) and clip:
                 image = Image.open(clip[0])
-            except Exception:
-                image = None
+        except Exception:
+            image = None
+
+        if image is None:
+            qimg = self.qapp.clipboard().image()
+            if not qimg.isNull():
+                qbuf = QBuffer()
+                qbuf.open(QIODevice.WriteOnly)
+                if qimg.save(qbuf, "BMP"):
+                    image = Image.open(io.BytesIO(bytes(qbuf.data()))).convert("RGB")
 
         if image is None:
             self._set_status("status_no_clip_img")
             self.toast.show_result(self._t("status_no_clip_img"), ok=False)
             if self.config.get("play_sound", True):
-                winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+                _play_beep(ok=False)
             return
 
         self._run_ocr_async(image)
@@ -872,21 +1089,25 @@ class QuickOCRWindow(QWidget):
         self.timing_lbl.setText(f"{elapsed_ms} ms")
 
         if text:
-            pyperclip.copy(text)
+            self._set_clipboard_text(text)
             self.preview_edit.setPlainText(text)
             self._set_status("status_copied")
             self.toast.show_result(self._t("status_copied"), ok=True, sub=f"{elapsed_ms} ms")
             if self.config.get("play_sound", True):
-                try:
-                    winsound.Beep(1050, 80)
-                except RuntimeError:
-                    winsound.MessageBeep(winsound.MB_OK)
+                _play_beep(ok=True)
         else:
             self.preview_edit.clear()
             self._set_status("status_no_text")
             self.toast.show_result(self._t("status_no_text"), ok=False)
             if self.config.get("play_sound", True):
-                winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+                _play_beep(ok=False)
+
+    def _set_clipboard_text(self, text: str) -> None:
+        self.qapp.clipboard().setText(text)
+        try:
+            pyperclip.copy(text)
+        except Exception:
+            pass
 
     def _handle_ocr_error(self, msg: str) -> None:
         self._ocr_busy = False
@@ -896,7 +1117,7 @@ class QuickOCRWindow(QWidget):
     def _copy_preview(self) -> None:
         content = self.preview_edit.toPlainText().strip()
         if content:
-            pyperclip.copy(content)
+            self._set_clipboard_text(content)
             self._set_status("status_recopied")
             self.toast.show_result(self._t("status_recopied"), ok=True)
 
@@ -969,6 +1190,8 @@ class QuickOCRWindow(QWidget):
         self.hide_to_tray()
 
     def quit_app(self) -> None:
+        if hasattr(self, "_update_check_timer"):
+            self._update_check_timer.stop()
         try:
             keyboard.unhook_all()
         except Exception:
@@ -983,11 +1206,11 @@ class QuickOCRWindow(QWidget):
         self.qapp.quit()
 
 
-def _notify_existing_instance() -> bool:
+def _notify_existing_instance(command: bytes = b"SHOW") -> bool:
     sock = QLocalSocket()
     sock.connectToServer(IPC_NAME)
     if sock.waitForConnected(250):
-        sock.write(b"SHOW")
+        sock.write(command)
         sock.flush()
         sock.waitForBytesWritten(200)
         sock.close()
@@ -1000,7 +1223,8 @@ def main() -> None:
     qapp = QApplication(sys.argv)
     qapp.setQuitOnLastWindowClosed(False)
 
-    if _notify_existing_instance():
+    want_snip = "--snip" in sys.argv
+    if _notify_existing_instance(b"SNIP" if want_snip else b"SHOW"):
         return
 
     load_app_fonts(FONTS_DIR)
@@ -1015,8 +1239,10 @@ def main() -> None:
         QLocalServer.removeServer(IPC_NAME)
         ipc_server.listen(IPC_NAME)
 
-    start_minimized = "--minimized" in sys.argv
+    start_minimized = "--minimized" in sys.argv or want_snip
     win = QuickOCRWindow(qapp, ipc_server=ipc_server, start_minimized=start_minimized)
+    if want_snip:
+        QTimer.singleShot(200, win._open_snip_overlay)
     sys.exit(qapp.exec())
 
 

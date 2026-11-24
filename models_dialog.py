@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLayout,
     QLineEdit,
+    QProgressBar,
     QScrollArea,
     QSizePolicy,
     QVBoxLayout,
@@ -71,11 +72,26 @@ QLineEdit {{
 QLineEdit:focus {{
     border: 1px solid #52525B;
 }}
+QFrame#StatusBox {{
+    background-color: {C_SURFACE};
+    border: 1px solid {C_BORDER};
+    border-radius: 10px;
+}}
+QProgressBar#ModelProgress {{
+    background-color: #1F1F23;
+    border: none;
+    border-radius: 3px;
+}}
+QProgressBar#ModelProgress::chunk {{
+    background-color: #FAFAFA;
+    border-radius: 3px;
+}}
 """
 
 
 class _WorkerSignals(QObject):
     finished = Signal(bool, str)
+    progress = Signal(int, str)
     detected = Signal(list, str)
 
 
@@ -102,6 +118,7 @@ class ModelsView(QWidget):
 
         self.signals = _WorkerSignals()
         self.signals.finished.connect(self._on_task_done)
+        self.signals.progress.connect(self._on_progress)
         self.signals.detected.connect(self._on_models_detected)
 
         self.setObjectName("ModelsPage")
@@ -182,7 +199,7 @@ class ModelsView(QWidget):
         container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         scroll.setWidget(container)
         self.scroll_col = QVBoxLayout(container)
-        self.scroll_col.setContentsMargins(0, 0, 6, 4)
+        self.scroll_col.setContentsMargins(12, 2, 12, 6)
         self.scroll_col.setSpacing(10)
         self.scroll_col.setSizeConstraint(QLayout.SetMinimumSize)
 
@@ -286,11 +303,28 @@ class ModelsView(QWidget):
         self.scroll_col.addWidget(self.custom_card)
         self.scroll_col.addStretch(1)
 
-        # Status line
+        # Dedicated status & progress footer (prevents overlap on cards)
+        self.status_frame = QFrame()
+        self.status_frame.setObjectName("StatusBox")
+        sf_col = QVBoxLayout(self.status_frame)
+        sf_col.setContentsMargins(12, 8, 12, 8)
+        sf_col.setSpacing(6)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setObjectName("ModelProgress")
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFixedHeight(6)
+        self.progress_bar.hide()
+        sf_col.addWidget(self.progress_bar)
+
         self.status_lbl = QLabel("")
         self.status_lbl.setStyleSheet(f"color: {C_MUTED}; font-size: 8.5pt; background: transparent;")
         self.status_lbl.setWordWrap(True)
-        root.addWidget(self.status_lbl)
+        sf_col.addWidget(self.status_lbl)
+        self.status_frame.hide()
+        root.addWidget(self.status_frame)
 
     def refresh_language(self, lang: str) -> None:
         self.lang = lang
@@ -490,16 +524,34 @@ class ModelsView(QWidget):
         self.active_model_id = model_id
         self._emit_change()
 
+    def _set_status_msg(self, text: str, show_progress: bool = False, pct: int = 0) -> None:
+        self.status_lbl.setText(text)
+        if show_progress:
+            self.progress_bar.setValue(max(0, min(100, pct)))
+            self.progress_bar.show()
+        else:
+            self.progress_bar.hide()
+        self.status_frame.setVisible(bool(text) or show_progress)
+
+    def _on_progress(self, pct: int, detail: str) -> None:
+        if not self._busy:
+            return
+        label = f"{pct}%  •  {detail}" if detail else f"{pct}%"
+        self._set_status_msg(label, show_progress=True, pct=pct)
+
     def _download_model(self, model_id: str) -> None:
         if self._busy:
             return
         self._busy = True
-        self.status_lbl.setText(self._t("msg_downloading"))
+        self._set_status_msg(f"0%  •  {self._t('msg_downloading')}", show_progress=True, pct=0)
         self._rebuild_list()
 
         def worker() -> None:
             try:
-                ocr_engine.install_model(model_id)
+                ocr_engine.install_model(
+                    model_id,
+                    on_progress=lambda p, m: self.signals.progress.emit(p, m),
+                )
                 self.signals.finished.emit(True, model_id)
             except Exception as exc:
                 self.signals.finished.emit(False, str(exc))
@@ -533,11 +585,14 @@ class ModelsView(QWidget):
         if not folder or self._busy:
             return
         self._busy = True
-        self.status_lbl.setText(self._t("msg_downloading"))
+        self._set_status_msg(f"0%  •  {self._t('msg_downloading')}", show_progress=True, pct=0)
 
         def worker() -> None:
             try:
-                ocr_engine.pull_model(from_dir=folder)
+                ocr_engine.pull_model(
+                    from_dir=folder,
+                    on_progress=lambda p, m: self.signals.progress.emit(p, m),
+                )
                 self.signals.finished.emit(True, "ocria-nano")
             except Exception as exc:
                 self.signals.finished.emit(False, str(exc))
@@ -551,13 +606,13 @@ class ModelsView(QWidget):
                 removed_id = info.split(":", 1)[1]
                 if self.active_model_id == removed_id:
                     self.active_model_id = "ocria-nano"
-                self.status_lbl.setText("")
+                self._set_status_msg("", show_progress=False)
             else:
                 self.active_model_id = info
-                self.status_lbl.setText("")
+                self._set_status_msg(self._t("msg_install_ready"), show_progress=False)
             self._emit_change()
         else:
-            self.status_lbl.setText(info)
+            self._set_status_msg(info, show_progress=False)
             self._rebuild_list()
 
     def _on_detect_models(self) -> None:
@@ -566,7 +621,7 @@ class ModelsView(QWidget):
         if not url:
             return
         self.detect_btn.setEnabled(False)
-        self.status_lbl.setText(self._t("msg_detecting"))
+        self._set_status_msg(self._t("msg_detecting"))
 
         def worker() -> None:
             try:
@@ -580,21 +635,21 @@ class ModelsView(QWidget):
     def _on_models_detected(self, found: list, err: str) -> None:
         self.detect_btn.setEnabled(True)
         if err:
-            self.status_lbl.setText(err)
+            self._set_status_msg(err)
             return
         if not found:
-            self.status_lbl.setText(self._t("msg_no_models_found"))
+            self._set_status_msg(self._t("msg_no_models_found"))
             return
         self.model_combo.clear()
         self.model_combo.addItems(found)
-        self.status_lbl.setText(f"{len(found)} model(s) detected")
+        self._set_status_msg(f"{len(found)} model(s) detected")
 
     def _on_add_custom(self) -> None:
         url = self.url_edit.text().strip()
         model_name = self.model_combo.currentText().strip()
         api_key = self.key_edit.text().strip()
         if not url or not model_name:
-            self.status_lbl.setText(self._t("msg_enter_url_model"))
+            self._set_status_msg(self._t("msg_enter_url_model"))
             return
         new_id = f"custom_{uuid.uuid4().hex[:8]}"
         entry = {
@@ -607,7 +662,7 @@ class ModelsView(QWidget):
         }
         self.custom_models.append(entry)
         self.active_model_id = new_id
-        self.status_lbl.setText("")
+        self._set_status_msg("")
         self._emit_change()
 
 

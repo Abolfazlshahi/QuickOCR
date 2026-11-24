@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QApplication
 
 import app
 import ocr_engine
+from i18n import LANGUAGES, TRANSLATIONS
 from snipper import SnipOverlay, get_virtual_screen_bounds, make_app_icon
 from ui_kit import APP_QSS, FloatingToast, load_app_fonts
 
@@ -31,14 +32,33 @@ def main() -> None:
     qapp.setFont(f)
     qapp.setStyleSheet(APP_QSS)
 
+    # 0. Trilingual key completeness check (Updater + Download progress)
+    req_i18n = (
+        "btn_check_update",
+        "btn_install_update",
+        "msg_checking_update",
+        "msg_up_to_date",
+        "msg_update_avail",
+        "msg_update_downloading",
+        "msg_update_applying",
+        "msg_update_err",
+        "msg_pip_stage",
+        "msg_weights_stage",
+        "msg_install_ready",
+    )
+    for lang_code in LANGUAGES:
+        for k in req_i18n:
+            assert k in TRANSLATIONS[lang_code], f"Missing i18n[{lang_code!r}][{k!r}]"
+
     # 1. Model present inside D:\app\QuickOCR\models & multi-model API check
     ready, status = ocr_engine.get_model_status("ocria-nano")
     assert ready, f"Model not ready: {status}"
     assert (ocr_engine.MODEL_DIR / "ocria-nano").exists()
 
     # 2. Hotkey syntax check
-    for hk in ("ctrl+alt+c", "ctrl+shift+c", "ctrl+alt+o"):
-        assert keyboard.parse_hotkey(hk)
+    if sys.platform == "win32":
+        for hk in ("ctrl+alt+c", "ctrl+shift+c", "ctrl+alt+o"):
+            assert keyboard.parse_hotkey(hk)
 
     # 3. Screen bounds, monochrome icon, and native exe check
     vx, vy, vw, vh = get_virtual_screen_bounds()
@@ -51,7 +71,8 @@ def main() -> None:
     finally:
         if ico_tmp.exists():
             ico_tmp.unlink()
-    assert (app.BASE_DIR / "QuickOCR.exe").exists(), "QuickOCR.exe missing"
+    if sys.platform == "win32":
+        assert (app.BASE_DIR / "QuickOCR.exe").exists(), "QuickOCR.exe missing"
 
     # 4. Main window: background start, RTL segmented pill fix, 3 languages, responsive
     app.save_config(app.DEFAULT_CONFIG)
@@ -139,9 +160,103 @@ def main() -> None:
     mv._on_category_change("recommended")
     qapp.processEvents()
     assert mv.cards_layout.count() == len(rec_models)
+    lm, _, rm, _ = mv.scroll_col.getContentsMargins()
+    assert lm >= 10 and rm >= 10, f"Scroll margins too tight for RTL scrollbar: {(lm, rm)}"
+    assert hasattr(mv, "progress_bar") and hasattr(mv, "status_frame")
+    mv._busy = True
+    mv._on_progress(45, "Downloading...")
+    qapp.processEvents()
+    assert mv.progress_bar.value() == 45 and not mv.progress_bar.isHidden()
+    mv._on_task_done(False, "Sample error detail")
+    qapp.processEvents()
+    assert not mv._busy and mv.progress_bar.isHidden() and "Sample error" in mv.status_lbl.text()
+
+    # Check download_file progress & pip error reporting
+    assert hasattr(ocr_engine, "download_file")
+    import http.server, threading, socketserver
+    payload = b"OCR-TEST" * 1024
+    class _H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+        def log_message(self, *args):
+            pass
+    srv = socketserver.TCPServer(("127.0.0.1", 0), _H)
+    port = srv.server_address[1]
+    t = threading.Thread(target=srv.handle_request, daemon=True)
+    t.start()
+    pcts = []
+    with tempfile.NamedTemporaryFile(delete=False) as tf:
+        dst = Path(tf.name)
+    try:
+        ocr_engine.download_file(f"http://127.0.0.1:{port}/test.bin", dst, on_progress=lambda p, _s="": pcts.append(p))
+        assert dst.read_bytes() == payload and 100 in pcts
+    finally:
+        srv.server_close()
+        dst.unlink(missing_ok=True)
+    err_msg = ocr_engine._extract_pip_error(["Collecting x", "ERROR: No matching distribution found for x"], 1)
+    assert "No matching distribution" in err_msg
+
     for i in range(mv.cards_layout.count()):
         card_w = mv.cards_layout.itemAt(i).widget().minimumSizeHint().width()
         assert card_w <= win.width(), f"Card {i} overflowed window width: {card_w} > {win.width()}"
+    # 5b. Auto-updater pure logic + UI footer check
+    import updater
+    assert updater.parse_version("v1.1.0") == (1, 1, 0)
+    assert updater.is_newer_version("v1.2.0", "v1.1.0")
+    assert not updater.is_newer_version("v1.1.0", "1.1.0")
+    assert not updater.is_newer_version("v1.0.3", "1.1.0")
+    fake_assets = [
+        {"name": "QuickOCR-v1.2.0-Windows.zip", "browser_download_url": "https://example.invalid/w.zip", "size": 100},
+        {"name": "QuickOCR-v1.2.0-Linux.tar.gz", "browser_download_url": "https://example.invalid/l.tar.gz", "size": 90},
+    ]
+    assert updater.select_release_asset(fake_assets, "win32")["name"].endswith("Windows.zip")
+    assert updater.select_release_asset(fake_assets, "linux")["name"].endswith("Linux.tar.gz")
+
+    import zipfile
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        zpath = tdp / "upd.zip"
+        with zipfile.ZipFile(zpath, "w") as zf:
+            zf.writestr("QuickOCR/app.py", "# new app")
+            zf.writestr("QuickOCR/config.json", '{"should_not_overwrite": true}')
+        target = tdp / "installed"
+        target.mkdir()
+        (target / "config.json").write_text('{"keep": 1}', encoding="utf-8")
+        (target / ".venv").mkdir()
+        (target / ".venv" / "marker.txt").write_text("keep", encoding="utf-8")
+        staged = updater.extract_update_archive(zpath, tdp / "stage")
+        updater.copy_update_tree(staged, target)
+        assert (target / "app.py").read_text(encoding="utf-8") == "# new app"
+        assert '"keep": 1' in (target / "config.json").read_text(encoding="utf-8")
+        assert (target / ".venv" / "marker.txt").exists()
+
+    assert hasattr(win, "update_btn") and hasattr(win, "ver_lbl") and hasattr(win, "update_progress")
+    win._on_update_checked(
+        True,
+        updater.ReleaseInfo("v9.9.9", "Test notes", "QuickOCR-v9.9.9-Windows.zip", "https://example.invalid/w.zip", 123),
+        "",
+    )
+    qapp.processEvents()
+    assert "v9.9.9" in win.update_btn.text()
+    win._available_release = None
+    win.update_btn.setText(win._t("btn_check_update"))
+    win.update_status_lbl.setText("")
+
+    # 5c. Linux cross-platform helpers & shell installers
+    assert hasattr(app, "get_linux_autostart_path")
+    assert str(app.get_linux_autostart_path()).replace("\\", "/").endswith(".config/autostart/quickocr.desktop")
+    assert hasattr(app, "_play_beep") and hasattr(app, "_open_app_folder")
+    assert (app.BASE_DIR / "setup_linux.sh").exists()
+    assert (app.BASE_DIR / "QuickOCR.sh").exists()
+    import snipper
+    qt_shot = snipper._capture_qt_virtual_screen()
+    assert qt_shot.width > 0 and qt_shot.height > 0
+    assert app._parse_ipc_command(b"SNIP") == "SNIP"
+    assert app._parse_ipc_command(b"SHOW") == "SHOW"
+
     win.stack.slideToIndex(0)
     qapp.processEvents()
 

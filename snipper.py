@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import ctypes
+import io
 from pathlib import Path
+import sys
 from typing import Optional, Tuple
 
 from PIL import Image, ImageDraw, ImageGrab
 from PySide6.QtCore import (
+    QBuffer,
     QEasingCurve,
+    QIODevice,
     QPoint,
     QPropertyAnimation,
     QRect,
@@ -32,17 +36,69 @@ from PySide6.QtWidgets import QWidget
 
 
 def get_virtual_screen_bounds() -> Tuple[int, int, int, int]:
-    """Return (left, top, width, height) covering all connected monitors in physical px."""
-    u32 = ctypes.windll.user32
-    vx = u32.GetSystemMetrics(76)   # SM_XVIRTUALSCREEN
-    vy = u32.GetSystemMetrics(77)   # SM_YVIRTUALSCREEN
-    vw = u32.GetSystemMetrics(78)   # SM_CXVIRTUALSCREEN
-    vh = u32.GetSystemMetrics(79)   # SM_CYVIRTUALSCREEN
-    if vw <= 0 or vh <= 0:
-        vw = u32.GetSystemMetrics(0)
-        vh = u32.GetSystemMetrics(1)
-        vx, vy = 0, 0
-    return vx, vy, vw, vh
+    """Return (left, top, width, height) covering all connected monitors."""
+    if sys.platform == "win32":
+        u32 = ctypes.windll.user32
+        vx = u32.GetSystemMetrics(76)   # SM_XVIRTUALSCREEN
+        vy = u32.GetSystemMetrics(77)   # SM_YVIRTUALSCREEN
+        vw = u32.GetSystemMetrics(78)   # SM_CXVIRTUALSCREEN
+        vh = u32.GetSystemMetrics(79)   # SM_CYVIRTUALSCREEN
+        if vw <= 0 or vh <= 0:
+            vw = u32.GetSystemMetrics(0)
+            vh = u32.GetSystemMetrics(1)
+            vx, vy = 0, 0
+        return vx, vy, vw, vh
+
+    screens = QGuiApplication.screens()
+    if not screens:
+        return 0, 0, 1920, 1080
+    vg = QRect()
+    for scr in screens:
+        vg = vg.united(scr.geometry())
+    return vg.x(), vg.y(), max(1, vg.width()), max(1, vg.height())
+
+
+def _qpixmap_to_pil(pm: QPixmap) -> Image.Image:
+    qbuf = QBuffer()
+    qbuf.open(QIODevice.WriteOnly)
+    pm.save(qbuf, "BMP")
+    return Image.open(io.BytesIO(bytes(qbuf.data()))).convert("RGB")
+
+
+def _capture_qt_virtual_screen() -> Image.Image:
+    """Capture all connected screens via Qt into one PIL image (used on Linux/non-Win32)."""
+    screens = QGuiApplication.screens()
+    if not screens:
+        return Image.new("RGB", (800, 600), "black")
+
+    vg = QRect()
+    for scr in screens:
+        vg = vg.united(scr.geometry())
+    canvas = Image.new("RGB", (max(1, vg.width()), max(1, vg.height())), "black")
+    for scr in screens:
+        pm = scr.grabWindow(0)
+        if pm.isNull():
+            continue
+        shot = _qpixmap_to_pil(pm)
+        g = scr.geometry()
+        if shot.size != (g.width(), g.height()):
+            shot = shot.resize((g.width(), g.height()), Image.Resampling.LANCZOS)
+        canvas.paste(shot, (g.x() - vg.x(), g.y() - vg.y()))
+    return canvas
+
+
+def _capture_virtual_screen() -> Tuple[Image.Image, QRect]:
+    vx, vy, vw, vh = get_virtual_screen_bounds()
+    if sys.platform == "win32":
+        raw = ImageGrab.grab(
+            bbox=(vx, vy, vx + vw, vy + vh),
+            include_layered_windows=True,
+            all_screens=True,
+        )
+        ps = QGuiApplication.primaryScreen()
+        geom = ps.virtualGeometry() if ps else QRect(vx, vy, vw, vh)
+        return raw, geom
+    return _capture_qt_virtual_screen(), QRect(vx, vy, vw, vh)
 
 
 def make_app_icon(
@@ -129,14 +185,7 @@ class SnipOverlay(QWidget):
             self._raw_shot = screenshot
             geom = QRect(0, 0, screenshot.width, screenshot.height)
         else:
-            vx, vy, vw, vh = get_virtual_screen_bounds()
-            self._raw_shot = ImageGrab.grab(
-                bbox=(vx, vy, vx + vw, vy + vh),
-                include_layered_windows=True,
-                all_screens=True,
-            )
-            ps = QGuiApplication.primaryScreen()
-            geom = ps.virtualGeometry() if ps else QRect(vx, vy, vw, vh)
+            self._raw_shot, geom = _capture_virtual_screen()
 
         self._pixmap = _pil_to_pixmap(self._raw_shot)
 

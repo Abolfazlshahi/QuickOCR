@@ -4,12 +4,19 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      backfill_notes:
+        description: 'Backfill release notes for prior tags from CHANGELOG.md'
+        type: boolean
+        default: true
 
 permissions:
   contents: write
 
 jobs:
-  release:
+  build-windows:
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-latest
     steps:
       - name: Checkout repository
@@ -36,28 +43,167 @@ jobs:
           $csc = "$env:SystemRoot\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
           & $csc /nologo /target:winexe /platform:x64 /win32icon:"icon.ico" /reference:System.Windows.Forms.dll /out:"QuickOCR.exe" "launcher.cs"
 
-      - name: Package release archive
+      - name: Package Windows release zip
         shell: powershell
         run: |
           $tag = $env:GITHUB_REF_NAME
           $stage = Join-Path $env:RUNNER_TEMP "QuickOCR"
+          if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           $items = @(
             "app.py", "ui_kit.py", "snipper.py", "ocr_engine.py",
-            "models_dialog.py", "i18n.py", "check_ocr.py", "launcher.cs",
-            "QuickOCR.exe", "QuickOCR.bat", "Setup.bat", "Uninstall.bat",
-            "requirements.txt", "icon.ico", "README.md", "LICENSE",
-            "assets", "models", "runtime"
+            "models_dialog.py", "updater.py", "i18n.py", "check_ocr.py",
+            "launcher.cs", "QuickOCR.exe", "QuickOCR.bat", "Setup.bat",
+            "Uninstall.bat", "requirements.txt", "icon.ico", "README.md",
+            "CHANGELOG.md", "LICENSE", "assets", "models", "runtime"
           )
           foreach ($it in $items) {
-            Copy-Item -Path $it -Destination (Join-Path $stage $it) -Recurse -Force
+            if (Test-Path $it) {
+              Copy-Item -Path $it -Destination (Join-Path $stage $it) -Recurse -Force
+            }
           }
           Compress-Archive -Path $stage -DestinationPath "QuickOCR-$tag-Windows.zip" -Force
 
-      - name: Publish GitHub Release
+      - name: Upload Windows asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-dist
+          path: QuickOCR-*-Windows.zip
+
+  build-linux:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Linux Qt/X11 & clipboard runtime libs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb xclip libxcb-cursor0 libxkbcommon-x11-0 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libgl1 libegl1
+
+      - name: Install dependencies and pull Linux ocria-nano runtime
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          rm -rf models/ocria-nano/runtime
+          LITEPARSE_MODEL_DIR="$PWD/models" lit models pull ocria-nano
+
+      - name: Run headless Qt/OCR verification on Linux
+        run: |
+          LITEPARSE_MODEL_DIR="$PWD/models" xvfb-run -a python check_ocr.py
+
+      - name: Package Linux release tar.gz
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          stage="${RUNNER_TEMP}/QuickOCR"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          chmod +x QuickOCR.sh setup_linux.sh
+          for item in app.py ui_kit.py snipper.py ocr_engine.py models_dialog.py \
+                      updater.py i18n.py check_ocr.py QuickOCR.sh setup_linux.sh \
+                      requirements.txt icon.ico README.md CHANGELOG.md LICENSE \
+                      assets models; do
+            cp -a "$item" "$stage/"
+          done
+          tar -C "${RUNNER_TEMP}" -czf "QuickOCR-${tag}-Linux.tar.gz" QuickOCR
+
+      - name: Upload Linux asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-dist
+          path: QuickOCR-*-Linux.tar.gz
+
+  publish-release:
+    needs: [build-windows, build-linux]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download release archives
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Extract CHANGELOG notes and publish GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: powershell
         run: |
-          $tag = $env:GITHUB_REF_NAME
-          gh release create "$tag" "QuickOCR-$tag-Windows.zip" --title "QuickOCR $tag" --generate-notes
+          tag="${GITHUB_REF_NAME}"
+          python3 - "$tag" <<'PY'
+          import re, sys
+          from pathlib import Path
+          tag = sys.argv[1]
+          text = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          m = re.search(rf"^##\s+{re.escape(tag)}\s*\n(.*?)(?=^##\s+v|\Z)", text, re.S | re.M)
+          notes = m.group(1).strip() if m else f"QuickOCR {tag}"
+          notes += f"\n\n### Downloads\n- **Windows:** `QuickOCR-{tag}-Windows.zip` (extract & run `Setup.bat`)\n- **Linux:** `QuickOCR-{tag}-Linux.tar.gz` (extract & run `./setup_linux.sh`)\n"
+          Path("release_notes.md").write_text(notes, encoding="utf-8")
+          PY
+          gh release create "$tag" dist/QuickOCR-${tag}-Windows.zip dist/QuickOCR-${tag}-Linux.tar.gz \
+            --title "QuickOCR $tag" --notes-file release_notes.md
+
+      - name: Backfill release notes on prior releases if needed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import json, re, subprocess
+          from pathlib import Path
+          text = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          for old_tag in ("v1.0.0", "v1.0.1", "v1.0.2", "v1.0.3"):
+              m = re.search(rf"^##\s+{re.escape(old_tag)}\s*\n(.*?)(?=^##\s+v|\Z)", text, re.S | re.M)
+              if not m:
+                  continue
+              view = subprocess.run(
+                  ["gh", "release", "view", old_tag, "--json", "body"],
+                  capture_output=True, text=True
+              )
+              if view.returncode != 0:
+                  continue
+              cur_body = json.loads(view.stdout).get("body", "")
+              if len(cur_body.strip()) < 200:
+                  note_file = Path(f"notes_{old_tag}.md")
+                  note_file.write_text(m.group(1).strip(), encoding="utf-8")
+                  subprocess.run(
+                      ["gh", "release", "edit", old_tag, "--notes-file", str(note_file)],
+                      check=False,
+                  )
+          PY
+
+  backfill-notes:
+    if: github.event_name == 'workflow_dispatch' && inputs.backfill_notes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Update all historical GitHub Release notes from CHANGELOG.md
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import re, subprocess
+          from pathlib import Path
+          text = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          for old_tag in ("v1.0.0", "v1.0.1", "v1.0.2", "v1.0.3", "v1.1.0"):
+              m = re.search(rf"^##\s+{re.escape(old_tag)}\s*\n(.*?)(?=^##\s+v|\Z)", text, re.S | re.M)
+              if not m:
+                  continue
+              note_file = Path(f"notes_{old_tag}.md")
+              note_file.write_text(m.group(1).strip(), encoding="utf-8")
+              subprocess.run(
+                  ["gh", "release", "edit", old_tag, "--notes-file", str(note_file)],
+                  check=False,
+              )
+          PY

@@ -246,18 +246,183 @@ MODEL_CATALOG: List[Dict[str, Any]] = [
 _CATALOG_MAP: Dict[str, Dict[str, Any]] = {m["id"]: m for m in MODEL_CATALOG}
 
 
+ProgressCallback = Optional[Callable[[int, str], None]]
+
+_MODEL_EST_MB: Dict[str, float] = {
+    "ocria-nano": 45.6,
+    "ppocrv5-arabic": 12.0,
+    "ppocrv6-tiny": 6.0,
+    "ppocrv6-small": 14.0,
+    "ppocrv6-medium": 34.0,
+    "ppocrv5-cyrillic": 12.0,
+    "ppocrv5-en": 11.0,
+    "ppocrv5-server": 85.0,
+    "ppocrv4-arabic": 10.0,
+    "easyocr-fa": 100.0,
+    "easyocr-ar-fa": 115.0,
+    "easyocr-ru-zh": 140.0,
+    "surya-ocr": 1200.0,
+    "marker-pdf": 1800.0,
+}
+
+
+def _emit_progress(cb: ProgressCallback, pct: int, msg: str) -> None:
+    if cb is not None:
+        cb(max(0, min(100, int(pct))), msg)
+
+
+def download_file(
+    url: str,
+    dest: Path,
+    on_progress: ProgressCallback = None,
+    timeout: float = 120.0,
+    label: str = "",
+) -> Path:
+    """Stream url to dest atomically via .part file while reporting 0..100% progress."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_suffix(dest.suffix + ".part")
+    req = urllib.request.Request(url, headers={"User-Agent": "QuickOCR"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            total = int(resp.headers.get("Content-Length") or 0)
+            read = 0
+            last_pct = -1
+            _emit_progress(on_progress, 0, label or dest.name)
+            with part.open("wb") as fh:
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    read += len(chunk)
+                    if total > 0:
+                        pct = min(100, int(read * 100 / total))
+                        if pct != last_pct:
+                            last_pct = pct
+                            mb_done = read / (1024 * 1024)
+                            mb_tot = total / (1024 * 1024)
+                            _emit_progress(
+                                on_progress,
+                                pct,
+                                f"{label or dest.name} ({mb_done:.1f}/{mb_tot:.1f} MB)",
+                            )
+                    elif read % (512 * 1024) < 65536:
+                        mb_done = read / (1024 * 1024)
+                        _emit_progress(on_progress, 50, f"{label or dest.name} ({mb_done:.1f} MB)")
+        part.replace(dest)
+        _emit_progress(on_progress, 100, label or dest.name)
+        return dest
+    except Exception:
+        part.unlink(missing_ok=True)
+        raise
+
+
 def _pip_python() -> str:
-    venv_py = BASE_DIR / ".venv" / "Scripts" / "python.exe"
+    rel = Path(".venv") / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+    venv_py = BASE_DIR / rel
     return str(venv_py) if venv_py.exists() else sys.executable
 
 
-def _run_pip(*args: str) -> None:
-    subprocess.run(
-        [_pip_python(), "-m", "pip", *args],
-        check=True,
+def _extract_pip_error(lines: List[str], returncode: int) -> str:
+    errors = [ln.strip() for ln in lines if ln.strip().startswith("ERROR:")]
+    if errors:
+        return errors[-1]
+    meaningful = [
+        ln.strip()
+        for ln in lines
+        if ln.strip() and not ln.strip().startswith("[notice]")
+    ]
+    if meaningful:
+        return " | ".join(meaningful[-2:])[:240]
+    return f"pip exited with code {returncode}"
+
+
+def _run_pip(
+    *args: str,
+    on_progress: ProgressCallback = None,
+    base_pct: int = 5,
+    end_pct: int = 60,
+    stage_label: str = "",
+) -> None:
+    subcmd = args[0] if args else ""
+    extra: List[str] = ["--no-input"]
+    if subcmd == "install":
+        extra = ["--timeout", "180", "--retries", "5", "--no-input", "--progress-bar", "off"]
+    cmd = [_pip_python(), "-m", "pip", subcmd, *extra, *args[1:]] if subcmd else [_pip_python(), "-m", "pip"]
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
+    lines: List[str] = []
+    pct = base_pct
+    span = max(1, end_pct - base_pct)
+    step = max(1, span // 10)
+    _emit_progress(on_progress, pct, stage_label or "pip...")
+    assert proc.stdout is not None
+    for raw in proc.stdout:
+        line = raw.strip()
+        if not line:
+            continue
+        lines.append(line)
+        if line.startswith(("Collecting ", "Downloading ", "Installing collected packages")):
+            if line.startswith("Installing collected packages"):
+                pct = max(pct, base_pct + int(span * 0.85))
+            else:
+                pct = min(base_pct + int(span * 0.82), pct + step)
+            _emit_progress(on_progress, pct, line[:72])
+        elif line.startswith("Successfully installed"):
+            pct = end_pct
+            _emit_progress(on_progress, pct, stage_label or line[:72])
+    rc = proc.wait()
+    if rc != 0:
+        raise RuntimeError(_extract_pip_error(lines, rc))
     importlib.invalidate_caches()
+
+
+def _dir_size_bytes(path: Path) -> int:
+    if not path.exists():
+        return 0
+    return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+
+
+def _run_with_dir_progress(
+    target_dir: Path,
+    expected_mb: float,
+    base_pct: int,
+    end_pct: int,
+    label: str,
+    on_progress: ProgressCallback,
+    fn: Callable[[], Any],
+) -> Any:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    initial_bytes = _dir_size_bytes(target_dir)
+    expected_bytes = max(1024 * 1024, int(expected_mb * 1024 * 1024))
+    stop_evt = threading.Event()
+    _emit_progress(on_progress, base_pct, label)
+
+    def poll() -> None:
+        span = max(1, end_pct - base_pct)
+        while not stop_evt.wait(0.25):
+            added = max(0, _dir_size_bytes(target_dir) - initial_bytes)
+            ratio = min(0.95, added / expected_bytes)
+            pct = base_pct + int(span * ratio)
+            mb_now = added / (1024 * 1024)
+            _emit_progress(on_progress, pct, f"{label} ({mb_now:.1f} MB)")
+
+    t = threading.Thread(target=poll, daemon=True)
+    t.start()
+    try:
+        return fn()
+    finally:
+        stop_evt.set()
+        t.join(timeout=1.0)
+        _emit_progress(on_progress, end_pct, label)
 
 
 def _find_tesseract_exe() -> Optional[str]:
@@ -411,76 +576,129 @@ def _build_surya_runner() -> Callable[[Image.Image], Any]:
         return lambda img: rec([img], det_predictor=det)
 
 
-def pull_model(from_dir: Optional[str] = None) -> str:
+def pull_model(
+    from_dir: Optional[str] = None,
+    on_progress: ProgressCallback = None,
+) -> str:
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     with _engine_lock:
         _liteparse_cache.pop("ocria-nano", None)
-    return models.pull("ocria-nano", from_dir=from_dir, quiet=True)
+    return _run_with_dir_progress(
+        MODEL_DIR / "ocria-nano",
+        _MODEL_EST_MB["ocria-nano"],
+        5,
+        100,
+        "OCRia-nano-1",
+        on_progress,
+        lambda: models.pull("ocria-nano", from_dir=from_dir, quiet=True),
+    )
 
 
-def install_model(model_id: str) -> None:
-    """One-click download & prepare any catalog model cleanly."""
+def install_model(model_id: str, on_progress: ProgressCallback = None) -> None:
+    """One-click download & prepare any catalog model with live progress reporting."""
     global _marker_cache, _surya_cache
     if model_id == "ocria-nano":
-        pull_model()
+        pull_model(on_progress=on_progress)
         return
 
     if model_id in _TESS_VARIANTS:
         data_dir, langs, base_url = _TESS_VARIANTS[model_id]
         data_dir.mkdir(parents=True, exist_ok=True)
-        for lang in langs:
+        total_langs = max(1, len(langs))
+        for idx, lang in enumerate(langs):
             dest = data_dir / f"{lang}.traineddata"
             if not dest.exists():
                 url = f"{base_url}/{lang}.traineddata"
-                req = urllib.request.Request(url, headers={"User-Agent": "QuickOCR"})
-                with urllib.request.urlopen(req, timeout=90.0) as resp:
-                    dest.write_bytes(resp.read())
+                base = int(idx * 85 / total_langs)
+                span = max(1, int(85 / total_langs))
+                download_file(
+                    url,
+                    dest,
+                    on_progress=lambda p, m, b=base, s=span: _emit_progress(
+                        on_progress, b + int(p * s / 100), m
+                    ),
+                    timeout=120.0,
+                    label=f"{lang}.traineddata",
+                )
 
         if _find_tesseract_exe() is None:
-            winget = shutil.which("winget")
-            if winget:
-                subprocess.run(
-                    [
-                        winget,
-                        "install",
-                        "-e",
-                        "--id",
-                        "UB-Mannheim.TesseractOCR",
-                        "--accept-source-agreements",
-                        "--accept-package-agreements",
-                        "--silent",
-                    ],
-                    check=False,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                )
+            _emit_progress(on_progress, 90, "Installing Tesseract binary...")
+            if sys.platform == "win32":
+                winget = shutil.which("winget")
+                if winget:
+                    subprocess.run(
+                        [
+                            winget,
+                            "install",
+                            "-e",
+                            "--id",
+                            "UB-Mannheim.TesseractOCR",
+                            "--accept-source-agreements",
+                            "--accept-package-agreements",
+                            "--silent",
+                        ],
+                        check=False,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    )
             if _find_tesseract_exe() is None:
-                raise RuntimeError(
-                    "tessdata downloaded, but tesseract.exe is not installed. Install UB-Mannheim TesseractOCR."
+                hint = (
+                    "Install UB-Mannheim TesseractOCR."
+                    if sys.platform == "win32"
+                    else "Install tesseract-ocr via your package manager (e.g. sudo apt install tesseract-ocr)."
                 )
+                raise RuntimeError(f"tessdata downloaded, but tesseract executable not found. {hint}")
         with _engine_lock:
             _liteparse_cache.pop(model_id, None)
+        _emit_progress(on_progress, 100, model_id)
         return
 
     if model_id == "surya-ocr":
         if importlib.util.find_spec("surya") is None:
-            _run_pip("install", "--no-warn-script-location", "surya-ocr")
-        SURYA_DIR.mkdir(parents=True, exist_ok=True)
+            _run_pip("install", "--no-warn-script-location", "surya-ocr", on_progress=on_progress, base_pct=3, end_pct=45, stage_label="surya-ocr")
         dummy = Image.new("RGB", (96, 48), "white")
-        with _engine_lock:
-            runner = _build_surya_runner()
-            runner(dummy)
-            _surya_cache = runner
+
+        def _prep_surya() -> None:
+            global _surya_cache
+            with _engine_lock:
+                runner = _build_surya_runner()
+                runner(dummy)
+                _surya_cache = runner
+
+        _run_with_dir_progress(
+            SURYA_DIR,
+            _MODEL_EST_MB["surya-ocr"],
+            45,
+            98,
+            "Surya weights",
+            on_progress,
+            _prep_surya,
+        )
         (SURYA_DIR / ".ready").write_text("ok", encoding="utf-8")
+        _emit_progress(on_progress, 100, "surya-ocr")
         return
 
     if model_id == "marker-pdf":
         if not is_marker_installed():
-            _run_pip("install", "--no-warn-script-location", "marker-pdf")
-        from marker.converters.pdf import PdfConverter  # type: ignore
-        from marker.models import create_model_dict  # type: ignore
+            _run_pip("install", "--no-warn-script-location", "marker-pdf", on_progress=on_progress, base_pct=3, end_pct=45, stage_label="marker-pdf")
 
-        with _engine_lock:
-            _marker_cache = PdfConverter(artifact_dict=create_model_dict())
+        def _prep_marker() -> None:
+            global _marker_cache
+            from marker.converters.pdf import PdfConverter  # type: ignore
+            from marker.models import create_model_dict  # type: ignore
+
+            with _engine_lock:
+                _marker_cache = PdfConverter(artifact_dict=create_model_dict())
+
+        _run_with_dir_progress(
+            SURYA_DIR,
+            _MODEL_EST_MB["marker-pdf"],
+            45,
+            98,
+            "Marker + Surya weights",
+            on_progress,
+            _prep_marker,
+        )
+        _emit_progress(on_progress, 100, "marker-pdf")
         return
 
     spec = _CATALOG_MAP.get(model_id)
@@ -489,26 +707,69 @@ def install_model(model_id: str) -> None:
 
     if spec.get("kind") == "rapidocr":
         if not is_rapidocr_pkg_installed():
-            _run_pip("install", "--no-warn-script-location", "rapidocr[rtl]", "onnxruntime")
+            _run_pip(
+                "install",
+                "--no-warn-script-location",
+                "rapidocr[rtl]",
+                "onnxruntime",
+                on_progress=on_progress,
+                base_pct=3,
+                end_pct=60,
+                stage_label="RapidOCR + ONNX",
+            )
         dummy = Image.new("RGB", (64, 32), "white")
         buf = io.BytesIO()
         dummy.save(buf, format="PNG")
-        with _engine_lock:
-            eng = _build_rapidocr_engine(model_id)
-            eng(buf.getvalue())
-            _rapid_cache[model_id] = eng
+
+        def _prep_rapid() -> None:
+            with _engine_lock:
+                eng = _build_rapidocr_engine(model_id)
+                eng(buf.getvalue())
+                _rapid_cache[model_id] = eng
+
+        _run_with_dir_progress(
+            RAPID_DIR,
+            _MODEL_EST_MB.get(model_id, 20.0),
+            60,
+            98,
+            spec["title"],
+            on_progress,
+            _prep_rapid,
+        )
         RAPID_DIR.mkdir(parents=True, exist_ok=True)
         (RAPID_DIR / f".ready_{model_id}").write_text("ok", encoding="utf-8")
+        _emit_progress(on_progress, 100, spec["title"])
         return
 
     if spec.get("kind") == "easyocr":
         if not is_easyocr_pkg_installed():
-            _run_pip("install", "--no-warn-script-location", "easyocr")
-        with _engine_lock:
-            reader = _build_easyocr_engine(model_id)
-            _easyocr_cache[model_id] = reader
+            _run_pip(
+                "install",
+                "--no-warn-script-location",
+                "easyocr",
+                on_progress=on_progress,
+                base_pct=3,
+                end_pct=60,
+                stage_label="EasyOCR",
+            )
+
+        def _prep_easy() -> None:
+            with _engine_lock:
+                reader = _build_easyocr_engine(model_id)
+                _easyocr_cache[model_id] = reader
+
+        _run_with_dir_progress(
+            EASYOCR_DIR,
+            _MODEL_EST_MB.get(model_id, 100.0),
+            60,
+            98,
+            spec["title"],
+            on_progress,
+            _prep_easy,
+        )
         EASYOCR_DIR.mkdir(parents=True, exist_ok=True)
         (EASYOCR_DIR / f".ready_{model_id}").write_text("ok", encoding="utf-8")
+        _emit_progress(on_progress, 100, spec["title"])
 
 
 def remove_model(model_id: str) -> None:
