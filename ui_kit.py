@@ -24,14 +24,17 @@ from PySide6.QtGui import (
     QFont,
     QFontDatabase,
     QFontMetrics,
+    QLinearGradient,
     QPainter,
     QPainterPath,
     QPen,
+    QPixmap,
 )
 from PySide6.QtWidgets import (
     QAbstractButton,
     QPushButton,
     QSizePolicy,
+    QStackedWidget,
     QWidget,
 )
 
@@ -433,21 +436,26 @@ class TelegramBanner(QWidget):
         w, h = float(self.width()), float(self.height())
         is_rtl = self.layoutDirection() == Qt.RightToLeft
 
-        bg = _lerp_color(QColor("#0D0D10"), QColor("#17171C"), self._hover_t)
-        border = _lerp_color(QColor("#242429"), QColor("#52525B"), self._hover_t)
+        c1 = _lerp_color(QColor("#24A1DE"), QColor("#2FB5F4"), self._hover_t)
+        c2 = _lerp_color(QColor("#1B86BC"), QColor("#229ED9"), self._hover_t)
         if self._pressed:
-            bg = _lerp_color(bg, QColor("#000000"), 0.2)
+            c1 = _lerp_color(c1, QColor("#000000"), 0.16)
+            c2 = _lerp_color(c2, QColor("#000000"), 0.16)
 
-        p.setBrush(bg)
+        grad = QLinearGradient(0.0, 0.0, w, h)
+        grad.setColorAt(0.0, c1)
+        grad.setColorAt(1.0, c2)
+        border = _lerp_color(QColor("#3AB2E8"), QColor("#7CD4FA"), self._hover_t)
+
+        p.setBrush(grad)
         p.setPen(QPen(border, 1.0))
         p.drawRoundedRect(QRectF(0.75, 0.75, w - 1.5, h - 1.5), 12.0, 12.0)
 
-        # Telegram paper-plane icon badge
+        # Crisp white circle + Telegram-blue paper plane
         icon_cx = w - 24.0 if is_rtl else 24.0
         icon_cy = h / 2.0
-        badge_bg = _lerp_color(QColor("#1A1A20"), QColor("#272730"), self._hover_t)
         p.setPen(Qt.NoPen)
-        p.setBrush(badge_bg)
+        p.setBrush(QColor("#FFFFFF"))
         p.drawEllipse(QPointF(icon_cx, icon_cy), 13.0, 13.0)
 
         plane = QPainterPath()
@@ -458,29 +466,28 @@ class TelegramBanner(QWidget):
         plane.lineTo(icon_cx - 2.0, icon_cy + 4.4)
         plane.lineTo(icon_cx - 1.8, icon_cy + 1.5)
         plane.closeSubpath()
-        p.setBrush(QColor("#FAFAFA"))
+        p.setBrush(QColor("#1B86BC"))
         p.drawPath(plane)
 
-        # @pythash pill on opposite edge
-        pill_w, pill_h = 84.0, 24.0
-        pill_x = 12.0 if is_rtl else (w - pill_w - 12.0)
+        # High-contrast white @pythash pill on opposite edge
+        pill_w, pill_h = 86.0, 24.0
+        pill_x = 11.0 if is_rtl else (w - pill_w - 11.0)
         pill_y = (h - pill_h) / 2.0
-        pill_fill = _lerp_color(QColor("#1C1C22"), QColor("#FAFAFA"), self._hover_t)
-        pill_fg = _lerp_color(QColor("#E4E4E7"), QColor("#09090B"), self._hover_t)
+        pill_fill = _lerp_color(QColor("#FFFFFF"), QColor("#E0F4FF"), self._hover_t)
         p.setBrush(pill_fill)
-        p.setPen(QPen(QColor("#32323A"), 1.0) if self._hover_t < 0.5 else Qt.NoPen)
+        p.setPen(Qt.NoPen)
         p.drawRoundedRect(QRectF(pill_x, pill_y, pill_w, pill_h), 12.0, 12.0)
 
-        p.setPen(pill_fg)
+        p.setPen(QColor("#1271A3"))
         p.setFont(QFont("Consolas", 8, QFont.Bold))
         nudge = 1.5 * self._hover_t * (-1 if is_rtl else 1)
         p.drawText(QRectF(pill_x + nudge, pill_y, pill_w, pill_h), Qt.AlignCenter, "\u202a@pythash ↗\u202c")
 
-        # Promo copy cleanly centered/aligned between icon and pill
-        p.setPen(QColor(C_TEXT))
+        # Bold crisp white promo text
+        p.setPen(QColor("#FFFFFF"))
         f = QFont(self.font())
         f.setPointSize(8)
-        f.setWeight(QFont.Medium)
+        f.setWeight(QFont.Bold)
         p.setFont(f)
         if is_rtl:
             txt_rect = QRectF(pill_x + pill_w + 10.0, 0.0, w - 44.0 - (pill_x + pill_w + 10.0), h)
@@ -488,6 +495,95 @@ class TelegramBanner(QWidget):
         else:
             txt_rect = QRectF(44.0, 0.0, pill_x - 54.0, h)
             p.drawText(txt_rect, Qt.AlignVCenter | Qt.AlignLeft, self._text)
+
+
+class _SlideOverlay(QWidget):
+    """Paints smooth 60fps slide + cross-fade transition between two stacked pages."""
+
+    def __init__(self, old_pix: QPixmap, new_pix: QPixmap, direction: int, parent: QWidget) -> None:
+        super().__init__(parent)
+        self._old = old_pix
+        self._new = new_pix
+        self._dir = direction  # +1 forward, -1 backward
+        self._t = 0.0
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setGeometry(parent.rect())
+
+    @Property(float)
+    def progress(self) -> float:
+        return self._t
+
+    @progress.setter
+    def progress(self, val: float) -> None:
+        self._t = val
+        self.update()
+
+    def paintEvent(self, _event) -> None:
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(C_BG))
+        w = float(self.width())
+        offset = w * 0.28 * self._dir
+
+        p.setOpacity(max(0.0, 1.0 - self._t * 1.15))
+        p.drawPixmap(QPointF(-offset * self._t, 0.0), self._old)
+
+        p.setOpacity(min(1.0, self._t * 1.1))
+        p.drawPixmap(QPointF(offset * (1.0 - self._t), 0.0), self._new)
+
+
+class AnimatedStackedWidget(QStackedWidget):
+    """QStackedWidget with silky 60fps OutCubic slide + cross-fade transitions."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._overlay: Optional[_SlideOverlay] = None
+        self._anim: Optional[QPropertyAnimation] = None
+
+    def slideToIndex(self, index: int) -> None:
+        cur = self.currentIndex()
+        if index == cur or index < 0 or index >= self.count():
+            return
+
+        if self.width() < 20 or self.height() < 20 or not self.isVisible():
+            self.setCurrentIndex(index)
+            return
+
+        if self._anim is not None:
+            self._anim.stop()
+            self._cleanup_overlay()
+
+        old_w = self.widget(cur)
+        new_w = self.widget(index)
+        old_pix = old_w.grab()
+
+        new_w.resize(self.size())
+        self.setCurrentIndex(index)
+        new_pix = new_w.grab()
+
+        step_dir = 1 if index > cur else -1
+        if self.layoutDirection() == Qt.RightToLeft:
+            step_dir = -step_dir
+
+        ov = _SlideOverlay(old_pix, new_pix, step_dir, self)
+        ov.show()
+        ov.raise_()
+        self._overlay = ov
+
+        anim = QPropertyAnimation(ov, b"progress", self)
+        anim.setDuration(280)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.finished.connect(self._cleanup_overlay)
+        self._anim = anim
+        anim.start()
+
+    def _cleanup_overlay(self) -> None:
+        if self._overlay is not None:
+            self._overlay.hide()
+            self._overlay.deleteLater()
+            self._overlay = None
+        self._anim = None
 
 
 class AnimatedToggle(QAbstractButton):

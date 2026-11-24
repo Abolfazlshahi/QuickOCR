@@ -1,4 +1,4 @@
-"""Pure-black minimal Model Manager dialog for switching, downloading, and adding OCR models."""
+"""Pure-black embedded Model Manager view with animated category filtering and 1-click installs."""
 
 from __future__ import annotations
 
@@ -15,8 +15,10 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QLineEdit,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -27,21 +29,17 @@ from ui_kit import (
     APP_QSS,
     C_BG,
     C_BORDER,
-    C_CARD,
     C_DIM,
     C_MUTED,
     C_OK,
     C_SURFACE,
     C_TEXT,
     AnimatedButton,
-    enable_dark_window,
+    AnimatedSegmented,
+    apply_window_taskbar_identity,
 )
 
-DIALOG_QSS = f"""
-QDialog#ModelsDlg {{
-    background-color: {C_BG};
-    color: {C_TEXT};
-}}
+FORM_QSS = f"""
 QComboBox {{
     background-color: {C_SURFACE};
     color: {C_TEXT};
@@ -81,8 +79,8 @@ class _WorkerSignals(QObject):
     detected = Signal(list, str)
 
 
-class ModelsDialog(QDialog):
-    """Modal dialog to switch, download, remove, or add OCR & Vision LLM models."""
+class ModelsView(QWidget):
+    """Embedded Model Manager page with 1-click download, language tiers, and Vision APIs."""
 
     def __init__(
         self,
@@ -90,6 +88,7 @@ class ModelsDialog(QDialog):
         active_model_id: str,
         custom_models: List[Dict[str, Any]],
         on_models_changed: Callable[[str, List[Dict[str, Any]]], None],
+        on_back: Optional[Callable[[], None]] = None,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
@@ -97,20 +96,21 @@ class ModelsDialog(QDialog):
         self.active_model_id = active_model_id
         self.custom_models = [dict(m) for m in custom_models]
         self.on_models_changed = on_models_changed
+        self.on_back = on_back
+        self._category = "all"
         self._busy = False
 
         self.signals = _WorkerSignals()
         self.signals.finished.connect(self._on_task_done)
         self.signals.detected.connect(self._on_models_detected)
 
-        self.setObjectName("ModelsDlg")
-        self.setWindowTitle(self._t("models_title"))
-        self.setLayoutDirection(Qt.RightToLeft if lang == "fa" else Qt.LeftToRight)
-        self.setStyleSheet(APP_QSS + DIALOG_QSS)
-        self.resize(500, 580)
-        self.setMinimumSize(420, 480)
-        enable_dark_window(self)
-
+        self.setObjectName("ModelsPage")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet(
+            APP_QSS
+            + FORM_QSS
+            + f"\nQWidget#ModelsPage, QWidget#ModelsScrollBody {{ background-color: {C_BG}; color: {C_TEXT}; }}\n"
+        )
         self._build_ui()
         self._rebuild_list()
 
@@ -119,76 +119,112 @@ class ModelsDialog(QDialog):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(16, 14, 16, 14)
+        root.setContentsMargins(18, 14, 18, 14)
         root.setSpacing(10)
 
-        # Header
+        # Header with smooth Back button
         hdr = QHBoxLayout()
-        title = QLabel(self._t("models_title"))
+        hdr.setSpacing(8)
+
+        self.back_btn = AnimatedButton(
+            self._t("btn_back"), variant="secondary", radius=9, height=30, padx=12
+        )
+        self.back_btn.clicked.connect(lambda: self.on_back() if self.on_back else None)
+        if self.on_back is None:
+            self.back_btn.hide()
+        hdr.addWidget(self.back_btn)
+
+        self.title_lbl = QLabel(self._t("models_title"))
         tf = QFont(self.font())
         tf.setPointSize(12)
         tf.setWeight(QFont.Bold)
-        title.setFont(tf)
-        title.setStyleSheet(f"color: {C_TEXT}; background: transparent;")
-        hdr.addWidget(title)
+        self.title_lbl.setFont(tf)
+        self.title_lbl.setStyleSheet(f"color: {C_TEXT}; background: transparent;")
+        hdr.addWidget(self.title_lbl)
         hdr.addStretch(1)
 
-        import_btn = AnimatedButton(
-            self._t("btn_import_dir"), variant="secondary", radius=9, height=28, padx=10
+        self.import_btn = AnimatedButton(
+            self._t("btn_import_dir"), variant="ghost", radius=9, height=28, padx=10
         )
-        import_btn.clicked.connect(self._on_import_dir)
-        hdr.addWidget(import_btn)
+        self.import_btn.clicked.connect(self._on_import_dir)
+        hdr.addWidget(self.import_btn)
         root.addLayout(hdr)
 
-        # Scrollable model list
+        # Animated category filter bar
+        self.cat_seg = AnimatedSegmented(
+            options=(
+                ("all", self._t("tab_all")),
+                ("fast", self._t("tab_fast")),
+                ("heavy", self._t("tab_heavy")),
+                ("api", self._t("tab_api")),
+            ),
+            initial="all",
+            on_change=self._on_category_change,
+            height=30,
+            min_seg_width=70,
+        )
+        root.addWidget(self.cat_seg)
+
+        # Scrollable list with opaque black viewport (prevents scroll ghosting)
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
+        scroll.setAlignment(Qt.AlignTop)
         scroll.setFrameShape(QFrame.NoFrame)
+        scroll.viewport().setAutoFillBackground(True)
+        scroll.viewport().setStyleSheet(f"background-color: {C_BG};")
         root.addWidget(scroll, 1)
 
         container = QWidget()
-        container.setObjectName("MainRoot")
+        container.setObjectName("ModelsScrollBody")
+        container.setAutoFillBackground(True)
+        container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         scroll.setWidget(container)
         self.scroll_col = QVBoxLayout(container)
-        self.scroll_col.setContentsMargins(0, 0, 0, 0)
+        self.scroll_col.setContentsMargins(0, 0, 6, 4)
         self.scroll_col.setSpacing(10)
+        self.scroll_col.setSizeConstraint(QLayout.SetMinimumSize)
 
-        sec1 = QLabel(self._t("models_local_sec"))
-        sec1.setStyleSheet(f"color: {C_MUTED}; font-size: 8.5pt; background: transparent;")
-        self.scroll_col.addWidget(sec1)
+        self.sec1_lbl = QLabel(self._t("models_local_sec"))
+        self.sec1_lbl.setStyleSheet(f"color: {C_MUTED}; font-size: 8.5pt; background: transparent;")
+        self.scroll_col.addWidget(self.sec1_lbl)
 
         self.cards_layout = QVBoxLayout()
         self.cards_layout.setSpacing(8)
         self.scroll_col.addLayout(self.cards_layout)
 
         # Custom Vision LLM / Server form card
-        sec2 = QLabel(self._t("models_custom_sec"))
-        sec2.setStyleSheet(f"color: {C_MUTED}; font-size: 8.5pt; padding-top: 4px; background: transparent;")
-        self.scroll_col.addWidget(sec2)
+        self.sec2_lbl = QLabel(self._t("models_custom_sec"))
+        self.sec2_lbl.setStyleSheet(
+            f"color: {C_MUTED}; font-size: 8.5pt; padding-top: 4px; background: transparent;"
+        )
+        self.scroll_col.addWidget(self.sec2_lbl)
 
-        custom_card = QFrame()
-        custom_card.setObjectName("Card")
-        cc = QVBoxLayout(custom_card)
+        self.custom_card = QFrame()
+        self.custom_card.setObjectName("Card")
+        self.custom_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        cc = QVBoxLayout(self.custom_card)
+        cc.setSizeConstraint(QLayout.SetMinimumSize)
         cc.setContentsMargins(14, 12, 14, 12)
         cc.setSpacing(8)
 
-        # Server presets
         presets_row = QHBoxLayout()
         presets_row.setSpacing(6)
-        pl = QLabel(self._t("lbl_preset_srv"))
-        pl.setStyleSheet(f"color: {C_DIM}; font-size: 8.5pt; background: transparent;")
-        presets_row.addWidget(pl)
-        for name, url in (("LM Studio", "http://localhost:1234/v1"), ("Ollama", "http://localhost:11434/v1")):
+        self.preset_lbl = QLabel(self._t("lbl_preset_srv"))
+        self.preset_lbl.setStyleSheet(f"color: {C_DIM}; font-size: 8.5pt; background: transparent;")
+        presets_row.addWidget(self.preset_lbl)
+        for name, url in (
+            ("LM Studio", "http://localhost:1234/v1"),
+            ("Ollama", "http://localhost:11434/v1"),
+        ):
             pb = AnimatedButton(name, variant="ghost", radius=8, height=24, padx=10)
             pb.clicked.connect(lambda _=False, u=url: self.url_edit.setText(u))
             presets_row.addWidget(pb)
         presets_row.addStretch(1)
         cc.addLayout(presets_row)
 
-        # Endpoint URL + Detect
-        u_lbl = QLabel(self._t("lbl_endpoint"))
-        u_lbl.setStyleSheet(f"color: {C_MUTED}; font-size: 8.5pt; background: transparent;")
-        cc.addWidget(u_lbl)
+        self.url_lbl = QLabel(self._t("lbl_endpoint"))
+        self.url_lbl.setStyleSheet(f"color: {C_MUTED}; font-size: 8.5pt; background: transparent;")
+        cc.addWidget(self.url_lbl)
 
         url_row = QHBoxLayout()
         url_row.setSpacing(8)
@@ -203,10 +239,9 @@ class ModelsDialog(QDialog):
         url_row.addWidget(self.detect_btn)
         cc.addLayout(url_row)
 
-        # Model Name (editable combo)
-        m_lbl = QLabel(self._t("lbl_model_name"))
-        m_lbl.setStyleSheet(f"color: {C_MUTED}; font-size: 8.5pt; background: transparent;")
-        cc.addWidget(m_lbl)
+        self.model_lbl = QLabel(self._t("lbl_model_name"))
+        self.model_lbl.setStyleSheet(f"color: {C_MUTED}; font-size: 8.5pt; background: transparent;")
+        cc.addWidget(self.model_lbl)
 
         self.model_combo = QComboBox()
         self.model_combo.setEditable(True)
@@ -214,10 +249,9 @@ class ModelsDialog(QDialog):
         self.model_combo.setEditText("qwen2.5-vl")
         cc.addWidget(self.model_combo)
 
-        # Optional API Key
-        k_lbl = QLabel(self._t("lbl_api_key"))
-        k_lbl.setStyleSheet(f"color: {C_MUTED}; font-size: 8.5pt; background: transparent;")
-        cc.addWidget(k_lbl)
+        self.key_lbl = QLabel(self._t("lbl_api_key"))
+        self.key_lbl.setStyleSheet(f"color: {C_MUTED}; font-size: 8.5pt; background: transparent;")
+        cc.addWidget(self.key_lbl)
 
         self.key_edit = QLineEdit()
         self.key_edit.setEchoMode(QLineEdit.Password)
@@ -225,92 +259,109 @@ class ModelsDialog(QDialog):
         self.key_edit.setPlaceholderText("sk-...")
         cc.addWidget(self.key_edit)
 
-        add_btn = AnimatedButton(
+        self.add_custom_btn = AnimatedButton(
             self._t("btn_add_custom"), variant="primary", radius=10, height=34, padx=16
         )
-        add_btn.clicked.connect(self._on_add_custom)
-        cc.addWidget(add_btn)
+        self.add_custom_btn.clicked.connect(self._on_add_custom)
+        cc.addWidget(self.add_custom_btn)
 
-        self.scroll_col.addWidget(custom_card)
-        self.scroll_col.addStretch(1)
+        self.scroll_col.addWidget(self.custom_card)
 
-        # Bottom status + close
-        foot = QHBoxLayout()
+        # Status line
         self.status_lbl = QLabel("")
         self.status_lbl.setStyleSheet(f"color: {C_MUTED}; font-size: 8.5pt; background: transparent;")
-        foot.addWidget(self.status_lbl, 1)
+        self.status_lbl.setWordWrap(True)
+        root.addWidget(self.status_lbl)
 
-        close_btn = AnimatedButton(
-            self._t("btn_close"), variant="secondary", radius=10, height=32, padx=16
+    def refresh_language(self, lang: str) -> None:
+        self.lang = lang
+        self.setLayoutDirection(Qt.RightToLeft if lang == "fa" else Qt.LeftToRight)
+        self.back_btn.setText(self._t("btn_back"))
+        self.title_lbl.setText(self._t("models_title"))
+        self.import_btn.setText(self._t("btn_import_dir"))
+        self.cat_seg.update_labels(
+            [self._t("tab_all"), self._t("tab_fast"), self._t("tab_heavy"), self._t("tab_api")]
         )
-        close_btn.clicked.connect(self.accept)
-        foot.addWidget(close_btn)
-        root.addLayout(foot)
+        self.sec1_lbl.setText(self._t("models_local_sec"))
+        self.sec2_lbl.setText(self._t("models_custom_sec"))
+        self.preset_lbl.setText(self._t("lbl_preset_srv"))
+        self.url_lbl.setText(self._t("lbl_endpoint"))
+        self.detect_btn.setText(self._t("btn_detect"))
+        self.model_lbl.setText(self._t("lbl_model_name"))
+        self.key_lbl.setText(self._t("lbl_api_key"))
+        self.add_custom_btn.setText(self._t("btn_add_custom"))
+        self._rebuild_list()
+
+    def _on_category_change(self, cat: str) -> None:
+        self._category = cat
+        self._rebuild_list()
 
     def _clear_cards(self) -> None:
         while self.cards_layout.count():
             item = self.cards_layout.takeAt(0)
             w = item.widget()
             if w is not None:
+                w.hide()
+                w.setParent(None)
                 w.deleteLater()
 
     def _rebuild_list(self) -> None:
         self._clear_cards()
+        show_local = self._category in ("all", "fast", "heavy")
+        show_custom = self._category in ("all", "api")
 
-        ocria_ok, ocria_info = ocr_engine.is_ocria_installed()
-        rapid_ok = ocr_engine.is_rapidocr_installed()
-        tess_ok = ocr_engine.is_tesseract_installed()
+        self.sec1_lbl.setVisible(show_local or (show_custom and len(self.custom_models) > 0))
+        self.sec2_lbl.setVisible(show_custom)
+        self.custom_card.setVisible(show_custom)
 
-        builtins = [
-            {
-                "id": "ocria-nano",
-                "title": f"OCRia-nano-1 ({ocria_info})" if ocria_ok else "OCRia-nano-1",
-                "desc": self._t("model_desc_ocria"),
-                "installed": ocria_ok,
-                "can_download": True,
-                "can_remove": ocria_ok,
-            },
-            {
-                "id": "rapidocr",
-                "title": "RapidOCR (PaddleOCR ONNX)",
-                "desc": self._t("model_desc_rapid"),
-                "installed": rapid_ok,
-                "can_download": True,
-                "can_remove": rapid_ok,
-            },
-            {
-                "id": "tesseract",
-                "title": "Tesseract OCR",
-                "desc": self._t("model_desc_tess"),
-                "installed": tess_ok,
-                "can_download": False,
-                "can_remove": False,
-            },
-        ]
+        if show_local:
+            for spec in ocr_engine.MODEL_CATALOG:
+                if self._category != "all" and spec["category"] != self._category:
+                    continue
+                mid = spec["id"]
+                installed = ocr_engine.is_model_installed(mid)
+                title = spec["title"]
+                if mid == "ocria-nano":
+                    ok, ver_info = ocr_engine.is_ocria_installed()
+                    if ok:
+                        title = f"{title} ({ver_info})"
+                entry = {
+                    "id": mid,
+                    "title": title,
+                    "desc": self._t(spec["desc_key"]),
+                    "langs": spec["langs"],
+                    "badge": spec["badge"],
+                    "installed": installed,
+                    "can_download": True,
+                    "can_remove": installed,
+                }
+                self.cards_layout.addWidget(self._make_model_card(entry, is_custom=False))
 
-        for entry in builtins:
-            self.cards_layout.addWidget(self._make_model_card(entry, is_custom=False))
-
-        for cm in self.custom_models:
-            entry = {
-                "id": cm["id"],
-                "title": cm.get("name") or cm["model_name"],
-                "desc": f"{cm['base_url']}  •  {cm['model_name']}",
-                "installed": True,
-                "can_download": False,
-                "can_remove": True,
-            }
-            self.cards_layout.addWidget(self._make_model_card(entry, is_custom=True))
+        if show_custom:
+            for cm in self.custom_models:
+                entry = {
+                    "id": cm["id"],
+                    "title": cm.get("name") or cm["model_name"],
+                    "desc": f"{cm['base_url']}  •  {cm['model_name']}",
+                    "langs": "Vision LLM",
+                    "badge": "API",
+                    "installed": True,
+                    "can_download": False,
+                    "can_remove": True,
+                }
+                self.cards_layout.addWidget(self._make_model_card(entry, is_custom=True))
 
     def _make_model_card(self, entry: Dict[str, Any], is_custom: bool) -> QFrame:
         card = QFrame()
         card.setObjectName("Card")
+        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         row = QHBoxLayout(card)
+        row.setSizeConstraint(QLayout.SetMinimumSize)
         row.setContentsMargins(12, 10, 12, 10)
         row.setSpacing(10)
 
         info_col = QVBoxLayout()
-        info_col.setSpacing(2)
+        info_col.setSpacing(4)
 
         top_line = QHBoxLayout()
         top_line.setSpacing(6)
@@ -343,6 +394,19 @@ class ModelsDialog(QDialog):
         top_line.addWidget(badge)
         top_line.addStretch(1)
         info_col.addLayout(top_line)
+
+        meta_line = QHBoxLayout()
+        meta_line.setSpacing(6)
+        for tag_text in (entry["langs"], entry["badge"]):
+            pill = QLabel(tag_text)
+            pill.setLayoutDirection(Qt.LeftToRight)
+            pill.setStyleSheet(
+                f"background: #141417; color: {C_MUTED}; border: 1px solid #232327; "
+                "border-radius: 5px; padding: 1px 6px; font-family: Consolas; font-size: 7.5pt;"
+            )
+            meta_line.addWidget(pill)
+        meta_line.addStretch(1)
+        info_col.addLayout(meta_line)
 
         desc_lbl = QLabel(entry["desc"])
         desc_lbl.setStyleSheet(f"color: {C_DIM}; font-size: 8pt; background: transparent;")
@@ -394,10 +458,7 @@ class ModelsDialog(QDialog):
 
         def worker() -> None:
             try:
-                if model_id == "ocria-nano":
-                    ocr_engine.pull_model()
-                elif model_id == "rapidocr":
-                    ocr_engine.install_rapidocr()
+                ocr_engine.install_model(model_id)
                 self.signals.finished.emit(True, model_id)
             except Exception as exc:
                 self.signals.finished.emit(False, str(exc))
@@ -419,10 +480,7 @@ class ModelsDialog(QDialog):
 
         def worker() -> None:
             try:
-                if model_id == "ocria-nano":
-                    ocr_engine.remove_ocria_nano()
-                elif model_id == "rapidocr":
-                    ocr_engine.remove_rapidocr()
+                ocr_engine.remove_model(model_id)
                 self.signals.finished.emit(True, f"removed:{model_id}")
             except Exception as exc:
                 self.signals.finished.emit(False, str(exc))
@@ -510,3 +568,27 @@ class ModelsDialog(QDialog):
         self.active_model_id = new_id
         self.status_lbl.setText("")
         self._emit_change()
+
+
+class ModelsDialog(QDialog):
+    """Standalone dialog wrapper around ModelsView."""
+
+    def __init__(
+        self,
+        lang: str,
+        active_model_id: str,
+        custom_models: List[Dict[str, Any]],
+        on_models_changed: Callable[[str, List[Dict[str, Any]]], None],
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("MainRoot")
+        self.setWindowTitle(tr(lang, "models_title"))
+        self.setLayoutDirection(Qt.RightToLeft if lang == "fa" else Qt.LeftToRight)
+        self.setStyleSheet(APP_QSS + FORM_QSS)
+        self.resize(520, 620)
+        apply_window_taskbar_identity(self)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.view = ModelsView(lang, active_model_id, custom_models, on_models_changed, parent=self)
+        lay.addWidget(self.view)

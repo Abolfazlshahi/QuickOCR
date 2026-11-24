@@ -14,7 +14,6 @@ from PySide6.QtWidgets import QApplication
 
 import app
 import ocr_engine
-from models_dialog import ModelsDialog
 from snipper import SnipOverlay, get_virtual_screen_bounds, make_app_icon
 from ui_kit import APP_QSS, FloatingToast, load_app_fonts
 
@@ -91,23 +90,24 @@ def main() -> None:
 
     win._apply_language("fa", save=True)
 
-    # 5. Model Manager dialog check (add custom model, switch, remove)
-    dlg = ModelsDialog(
-        lang="fa",
-        active_model_id=win.config["active_model"],
-        custom_models=[],
-        on_models_changed=win._on_models_changed,
-        parent=win,
-    )
-    dlg.url_edit.setText("http://localhost:1234/v1")
-    dlg.model_combo.setEditText("qwen2.5-vl-7b")
-    dlg._on_add_custom()
+    # 5. Embedded Model Manager view + AnimatedStackedWidget slide + catalog check
+    assert len(ocr_engine.MODEL_CATALOG) >= 11
+    for req_id in ("ocria-nano", "ppocrv6-tiny", "ppocrv6-small", "ppocrv6-medium", "ppocrv5-arabic", "ppocrv5-cyrillic", "tesseract-multi", "marker-pdf"):
+        assert any(m["id"] == req_id for m in ocr_engine.MODEL_CATALOG), f"Missing {req_id}"
+
+    win.stack.slideToIndex(1)
+    qapp.processEvents()
+    mv = win.models_view
+    mv.url_edit.setText("http://localhost:1234/v1")
+    mv.model_combo.setEditText("qwen2.5-vl-7b")
+    mv._on_add_custom()
     assert win.config["active_model"].startswith("custom_")
     assert len(win.config["custom_models"]) == 1
-    dlg._remove_model(win.config["active_model"], is_custom=True)
+    mv._remove_model(win.config["active_model"], is_custom=True)
     assert win.config["active_model"] == "ocria-nano"
     assert len(win.config["custom_models"]) == 0
-    dlg.close()
+    win.stack.slideToIndex(0)
+    qapp.processEvents()
 
     # 6. SnipOverlay drag-crop + cancel + FloatingToast + real OCR
     sample = Image.new("RGB", (600, 200), "white")

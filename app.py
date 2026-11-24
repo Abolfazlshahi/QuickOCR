@@ -47,7 +47,7 @@ from PySide6.QtWidgets import (
 
 import ocr_engine
 from i18n import LANGUAGES, tr
-from models_dialog import ModelsDialog
+from models_dialog import ModelsView
 from snipper import SnipOverlay, make_app_icon
 from ui_kit import (
     APP_QSS,
@@ -60,6 +60,7 @@ from ui_kit import (
     C_TEXT,
     AnimatedButton,
     AnimatedSegmented,
+    AnimatedStackedWidget,
     FloatingToast,
     TelegramBanner,
     ToggleRow,
@@ -297,18 +298,30 @@ class QuickOCRWindow(QWidget):
         return tr(self.lang, key, **kwargs)
 
     def _build_ui(self) -> None:
-        outer = QVBoxLayout(self)
+        win_layout = QVBoxLayout(self)
+        win_layout.setContentsMargins(0, 0, 0, 0)
+        win_layout.setSpacing(0)
+
+        self.stack = AnimatedStackedWidget(self)
+        win_layout.addWidget(self.stack)
+
+        main_page = QWidget()
+        main_page.setObjectName("MainRoot")
+        outer = QVBoxLayout(main_page)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
         # Scrollable container guarantees zero clipped controls at any window size
-        scroll = QScrollArea(self)
+        scroll = QScrollArea(main_page)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
+        scroll.viewport().setAutoFillBackground(True)
+        scroll.viewport().setStyleSheet(f"background-color: {C_BG};")
         outer.addWidget(scroll)
 
         body = QWidget()
         body.setObjectName("MainRoot")
+        body.setAutoFillBackground(True)
         scroll.setWidget(body)
 
         root_col = QVBoxLayout(body)
@@ -561,6 +574,16 @@ class QuickOCRWindow(QWidget):
         footer_col.addLayout(foot)
 
         outer.addWidget(footer_wrap)
+        self.stack.addWidget(main_page)
+
+        self.models_view = ModelsView(
+            lang=self.lang,
+            active_model_id=self.config.get("active_model", "ocria-nano"),
+            custom_models=self.config.get("custom_models", []),
+            on_models_changed=self._on_models_changed,
+            on_back=lambda: self.stack.slideToIndex(0),
+        )
+        self.stack.addWidget(self.models_view)
 
     @staticmethod
     def _divider() -> QFrame:
@@ -613,6 +636,8 @@ class QuickOCRWindow(QWidget):
         self.quit_btn.setText(self._t("btn_quit"))
         self.status_lbl.setText(self._t(self._status_key))
 
+        if hasattr(self, "models_view"):
+            self.models_view.refresh_language(lang)
         if hasattr(self, "tray"):
             self._rebuild_tray_menu()
 
@@ -622,14 +647,8 @@ class QuickOCRWindow(QWidget):
         self.active_model_pill.setText(label)
 
     def _open_models_dialog(self) -> None:
-        dlg = ModelsDialog(
-            lang=self.lang,
-            active_model_id=self.config.get("active_model", "ocria-nano"),
-            custom_models=self.config.get("custom_models", []),
-            on_models_changed=self._on_models_changed,
-            parent=self,
-        )
-        dlg.exec()
+        self.models_view._rebuild_list()
+        self.stack.slideToIndex(1)
 
     def _on_models_changed(self, active_id: str, custom_models: List[Dict[str, Any]]) -> None:
         self.config["active_model"] = active_id
@@ -925,6 +944,7 @@ class QuickOCRWindow(QWidget):
     def show_window(self) -> None:
         self._show_group.stop()
         if not self.isVisible():
+            self.stack.setCurrentIndex(0)
             self.setWindowOpacity(0.0)
             self.show()
             apply_window_taskbar_identity(self, ICON_PATH, EXE_LAUNCHER)
