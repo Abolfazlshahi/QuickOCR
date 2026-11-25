@@ -209,11 +209,17 @@ def main() -> None:
     assert not updater.is_newer_version("v1.1.0", "1.1.0")
     assert not updater.is_newer_version("v1.0.3", "1.1.0")
     fake_assets = [
-        {"name": "QuickOCR-v1.2.0-Windows.zip", "browser_download_url": "https://example.invalid/w.zip", "size": 100},
-        {"name": "QuickOCR-v1.2.0-Linux.tar.gz", "browser_download_url": "https://example.invalid/l.tar.gz", "size": 90},
+        {"name": "QuickOCR-v1.2.0-Windows-Portable.zip", "browser_download_url": "https://example.invalid/w.zip", "size": 100},
+        {"name": "QuickOCR-v1.2.0-Windows-Setup.exe", "browser_download_url": "https://example.invalid/s.exe", "size": 120},
+        {"name": "QuickOCR-v1.2.0-Linux-Portable.tar.gz", "browser_download_url": "https://example.invalid/l.tar.gz", "size": 90},
+        {"name": "QuickOCR-v1.2.0-Linux-x86_64.AppImage", "browser_download_url": "https://example.invalid/l.AppImage", "size": 95},
     ]
-    assert updater.select_release_asset(fake_assets, "win32")["name"].endswith("Windows.zip")
-    assert updater.select_release_asset(fake_assets, "linux")["name"].endswith("Linux.tar.gz")
+    assert updater.select_release_asset(fake_assets, "win32")["name"].endswith("Windows-Portable.zip")
+    assert updater.select_release_asset(fake_assets, "linux")["name"].endswith("Linux-Portable.tar.gz")
+    assert updater.select_release_asset(fake_assets, "linux", prefer_appimage=True)["name"].endswith(".AppImage")
+    assert hasattr(ocr_engine, "resolve_data_dir")
+    assert ocr_engine.resolve_data_dir(app.BASE_DIR) == app.BASE_DIR
+    assert ocr_engine.resolve_data_dir(app.BASE_DIR, force_readonly=True) != app.BASE_DIR
 
     import zipfile
     with tempfile.TemporaryDirectory() as td:
@@ -222,16 +228,20 @@ def main() -> None:
         with zipfile.ZipFile(zpath, "w") as zf:
             zf.writestr("QuickOCR/app.py", "# new app")
             zf.writestr("QuickOCR/config.json", '{"should_not_overwrite": true}')
+            zf.writestr("QuickOCR/packages/stale.py", "x")
         target = tdp / "installed"
         target.mkdir()
         (target / "config.json").write_text('{"keep": 1}', encoding="utf-8")
         (target / ".venv").mkdir()
         (target / ".venv" / "marker.txt").write_text("keep", encoding="utf-8")
+        (target / "packages").mkdir()
+        (target / "packages" / "pkg.txt").write_text("keep", encoding="utf-8")
         staged = updater.extract_update_archive(zpath, tdp / "stage")
         updater.copy_update_tree(staged, target)
         assert (target / "app.py").read_text(encoding="utf-8") == "# new app"
         assert '"keep": 1' in (target / "config.json").read_text(encoding="utf-8")
         assert (target / ".venv" / "marker.txt").exists()
+        assert (target / "packages" / "pkg.txt").exists()
 
     assert hasattr(win, "update_btn") and hasattr(win, "ver_lbl") and hasattr(win, "update_progress")
     win._on_update_checked(
@@ -251,6 +261,7 @@ def main() -> None:
     assert hasattr(app, "_play_beep") and hasattr(app, "_open_app_folder")
     assert (app.BASE_DIR / "setup_linux.sh").exists()
     assert (app.BASE_DIR / "QuickOCR.sh").exists()
+    assert (app.BASE_DIR / "installer.iss").exists()
     import snipper
     qt_shot = snipper._capture_qt_virtual_screen()
     assert qt_shot.width > 0 and qt_shot.height > 0
@@ -292,8 +303,30 @@ def main() -> None:
 
     md = ocr_engine.extract_text(captured[0], output_format="markdown")
     txt = ocr_engine.extract_text(captured[0], output_format="text")
-    assert "QuickOCR" in md and "2026" in md
-    assert "QuickOCR" in txt and "2026" in txt
+    assert "QuickOCR Self-Check 2026" in md
+    assert "QuickOCR Self-Check 2026" in txt
+
+    # Dark-mode mixed Persian+English OCR quality check
+    from PySide6.QtGui import QColor, QImage, QPainter
+    from PySide6.QtCore import QRect
+    dark_qi = QImage(760, 70, QImage.Format_RGB888)
+    dark_qi.fill(QColor(18, 18, 22))
+    dp = QPainter(dark_qi)
+    dp.setPen(QColor(244, 244, 245))
+    dp.setFont(QFont("Tahoma", 11))
+    dp.drawText(QRect(16, 10, 728, 50), Qt.AlignRight | Qt.AlignVCenter, "در یک مرورگر YouTube حدود 3 برابر سریع‌تر کار می‌کند.")
+    dp.end()
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+        dp_path = Path(tf.name)
+    try:
+        dark_qi.save(str(dp_path))
+        dark_pil = Image.open(dp_path).convert("RGB")
+    finally:
+        dp_path.unlink(missing_ok=True)
+    prepped = ocr_engine._preprocess_ocr_image(dark_pil)
+    assert prepped.getpixel((4, 4))[0] > 200 and prepped.width > dark_pil.width
+    fa_out = ocr_engine.extract_text(dark_pil, output_format="text")
+    assert "YouTube" in fa_out and "3" in fa_out and " " in fa_out, f"Bad dark FA OCR: {fa_out!r}"
 
     QTimer.singleShot(250, win.quit_app)
     qapp.exec()

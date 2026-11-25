@@ -4,6 +4,18 @@ All notable changes to **QuickOCR** are documented here.
 
 ---
 
+## v1.2.0
+
+### Highlights
+- **Zero-Setup Native Releases for Windows & Linux (With Full Runtime Model Installer)**:
+  - **Windows Native Setup & Portable (`QuickOCR-v1.2.0-Windows-Setup.exe` & `QuickOCR-v1.2.0-Windows-Portable.zip`)**: Bundles a self-contained non-MSIX Python 3.11 runtime with `PySide6`, `liteparse`, `ocria-nano`, and `pip` pre-installed — no system Python or `Setup.bat` needed! Clicking **Download & Install** for `Surya OCR`, `EasyOCR`, `PP-OCRv5`, or `Marker` continues to work directly inside the app folder.
+  - **Linux AppImage & Portable (`QuickOCR-v1.2.0-Linux-x86_64.AppImage` & `QuickOCR-v1.2.0-Linux-Portable.tar.gz`)**: Bundles relocatable standalone CPython + ELF `QuickOCR` launcher + Linux `libonnxruntime.so`. Added automatic writable `DATA_DIR` + `PACKAGES_DIR` fallback (`~/.local/share/QuickOCR`) so even single-file read-only `.AppImage` users can install new models & self-update seamlessly!
+- **OCR Text Spacing & Dark-Mode Accuracy Fix (`ocr_engine.py`)**:
+  - Added `_preprocess_ocr_image` (automatic Dark-Mode background luminance detection & inversion, smart 1.5x/2x upscaling for sharp UI screenshots, and 24px edge padding) plus `preserve_very_small_text=True` and `ocr_despeckle_scans=False` on `LiteParse` — preserving Persian word spaces, hyphens (`QuickOCR Self-Check 2026`), and English words on dark interfaces cleanly.
+- **Launcher Polish**: Updated `QuickOCR.bat` and `Uninstall.bat` to launch and stop `QuickOCR.exe` directly, and added `--version` CLI support.
+
+---
+
 ## v1.1.0
 
 ### Highlights

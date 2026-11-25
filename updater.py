@@ -17,10 +17,10 @@ import zipfile
 
 import ocr_engine
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 GITHUB_LATEST_API = "https://api.github.com/repos/Abolfazlshahi/QuickOCR/releases/latest"
 
-_PRESERVED_ROOT_NAMES = frozenset({"config.json", ".venv"})
+_PRESERVED_ROOT_NAMES = frozenset({"config.json", ".venv", "packages"})
 _PRESERVED_MODEL_SUBDIRS = frozenset(
     {"rapidocr", "tessdata", "tessdata_best", "easyocr", "surya", "hf"}
 )
@@ -58,9 +58,17 @@ def is_newer_version(latest_tag: str, current_tag: str = APP_VERSION) -> bool:
 def select_release_asset(
     assets: List[Dict[str, Any]],
     platform: str = sys.platform,
+    prefer_appimage: Optional[bool] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Pick the appropriate archive asset for the running OS."""
+    """Pick the appropriate archive or AppImage asset for the running OS."""
     is_win = platform == "win32"
+    if prefer_appimage is None:
+        prefer_appimage = bool(os.environ.get("APPIMAGE"))
+    if not is_win and prefer_appimage:
+        for asset in assets:
+            low = str(asset.get("name") or "").lower()
+            if low.endswith(".appimage"):
+                return asset
     for asset in assets:
         name = str(asset.get("name") or "")
         low = name.lower()
@@ -179,6 +187,20 @@ def apply_update_and_prepare_restart(
         timeout=180.0,
         label=release.asset_name,
     )
+
+    appimage_env = os.environ.get("APPIMAGE")
+    if sys.platform != "win32" and appimage_env and release.asset_name.lower().endswith(".appimage"):
+        target_appimage = Path(appimage_env)
+        os.chmod(archive_path, 0o755)
+        shutil.move(str(archive_path), str(target_appimage))
+        shutil.rmtree(tmp_root, ignore_errors=True)
+        ocr_engine._emit_progress(on_progress, 100, release.tag)
+
+        def _appimage_restart() -> None:
+            os.execv(str(target_appimage), [str(target_appimage)])
+
+        return _appimage_restart
+
     ocr_engine._emit_progress(on_progress, 90, "Extracting...")
     source_root = extract_update_archive(archive_path, stage_dir)
     _prune_preserved(source_root)
@@ -188,10 +210,12 @@ def apply_update_and_prepare_restart(
         pid = os.getpid()
         exe_target = app_dir / "QuickOCR.exe"
         pyw_target = app_dir / ".venv" / "Scripts" / "pythonw.exe"
+        rt_py = app_dir / "runtime" / "pythonw.exe"
+        fallback_py = pyw_target if pyw_target.exists() else (rt_py if rt_py.exists() else Path(sys.executable))
         launch_cmd = (
             f'start "" "{exe_target}"'
             if exe_target.exists()
-            else f'start "" "{pyw_target if pyw_target.exists() else sys.executable}" "{app_dir / "app.py"}"'
+            else f'start "" "{fallback_py}" "{app_dir / "app.py"}"'
         )
         cmd_script = tmp_root / "apply_update.cmd"
         cmd_script.write_text(
@@ -213,14 +237,17 @@ def apply_update_and_prepare_restart(
         return _win_restart
 
     copy_update_tree(source_root, app_dir)
-    for sh_name in ("QuickOCR.sh", "setup_linux.sh"):
-        sh_path = app_dir / sh_name
-        if sh_path.exists():
-            os.chmod(sh_path, 0o755)
+    for exe_name in ("QuickOCR", "QuickOCR.sh", "setup_linux.sh"):
+        exe_path = app_dir / exe_name
+        if exe_path.exists():
+            os.chmod(exe_path, 0o755)
     shutil.rmtree(tmp_root, ignore_errors=True)
     ocr_engine._emit_progress(on_progress, 100, release.tag)
 
     def _posix_restart() -> None:
+        bin_launcher = app_dir / "QuickOCR"
+        if bin_launcher.exists():
+            os.execv(str(bin_launcher), [str(bin_launcher)])
         os.execv(sys.executable, [sys.executable, str(app_dir / "app.py")])
 
     return _posix_restart

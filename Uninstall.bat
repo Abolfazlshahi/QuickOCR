@@ -4,6 +4,7 @@ cd /d "%~dp0"
 title QuickOCR Uninstaller
 
 echo Stopping QuickOCR if running...
+taskkill /F /IM QuickOCR.exe >nul 2>nul
 powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'python*' -and $_.CommandLine -like '*QuickOCR*app.py*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 
 echo Removing shortcuts...

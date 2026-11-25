@@ -8,7 +8,9 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
+import site
 import subprocess
 import sys
 import tempfile
@@ -17,15 +19,58 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageStat
 
 BASE_DIR = Path(__file__).resolve().parent
-MODEL_DIR = BASE_DIR / "models"
+
+
+def _is_dir_writable(path: Path) -> bool:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / f".qocr_probe_{os.getpid()}"
+        probe.write_text("", encoding="utf-8")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def resolve_data_dir(base_dir: Path = BASE_DIR, force_readonly: bool = False) -> Path:
+    """Use base_dir when writable; fall back to user data dir for read-only AppImage/system installs."""
+    env_dir = os.environ.get("QUICKOCR_DATA_DIR")
+    if env_dir:
+        return Path(env_dir)
+    if not force_readonly and not os.environ.get("APPIMAGE") and _is_dir_writable(base_dir):
+        return base_dir
+    if sys.platform == "win32":
+        root = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    else:
+        root = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    data_dir = root / "QuickOCR"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    return data_dir
+
+
+DATA_DIR = resolve_data_dir(BASE_DIR)
+PACKAGES_DIR = DATA_DIR / "packages"
+if PACKAGES_DIR.exists():
+    site.addsitedir(str(PACKAGES_DIR))
+
+MODEL_DIR = DATA_DIR / "models"
 RAPID_DIR = MODEL_DIR / "rapidocr"
 TESSDATA_DIR = MODEL_DIR / "tessdata"
 TESSBEST_DIR = MODEL_DIR / "tessdata_best"
 EASYOCR_DIR = MODEL_DIR / "easyocr"
 SURYA_DIR = MODEL_DIR / "surya"
+
+# Seed bundled offline ocria-nano into DATA_DIR on read-only launches (e.g. Linux AppImage)
+if DATA_DIR != BASE_DIR:
+    _bundled_ocria = BASE_DIR / "models" / "ocria-nano"
+    _dest_ocria = MODEL_DIR / "ocria-nano"
+    if (_bundled_ocria / "det.onnx").exists() and not (_dest_ocria / "det.onnx").exists():
+        _dest_ocria.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(_bundled_ocria, _dest_ocria, dirs_exist_ok=True)
+
 os.environ.setdefault("LITEPARSE_MODEL_DIR", str(MODEL_DIR))
 os.environ.setdefault("MODEL_CACHE_DIR", str(SURYA_DIR))
 os.environ.setdefault("HF_HOME", str(MODEL_DIR / "hf"))
@@ -318,9 +363,20 @@ def download_file(
 
 
 def _pip_python() -> str:
-    rel = Path(".venv") / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
-    venv_py = BASE_DIR / rel
-    return str(venv_py) if venv_py.exists() else sys.executable
+    venv_py = BASE_DIR / ".venv" / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+    if venv_py.exists():
+        return str(venv_py)
+    rt_py = BASE_DIR / "runtime" / ("python.exe" if sys.platform == "win32" else "bin/python3")
+    if rt_py.exists():
+        return str(rt_py)
+    return sys.executable
+
+
+def _should_use_target_packages() -> bool:
+    venv_py = BASE_DIR / ".venv" / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+    if venv_py.exists():
+        return False
+    return DATA_DIR != BASE_DIR or os.environ.get("QUICKOCR_TARGET_PACKAGES") == "1"
 
 
 def _extract_pip_error(lines: List[str], returncode: int) -> str:
@@ -345,10 +401,19 @@ def _run_pip(
     stage_label: str = "",
 ) -> None:
     subcmd = args[0] if args else ""
+    py_exe = _pip_python()
+    use_target = _should_use_target_packages()
     extra: List[str] = ["--no-input"]
     if subcmd == "install":
         extra = ["--timeout", "180", "--retries", "5", "--no-input", "--progress-bar", "off"]
-    cmd = [_pip_python(), "-m", "pip", subcmd, *extra, *args[1:]] if subcmd else [_pip_python(), "-m", "pip"]
+        if use_target:
+            PACKAGES_DIR.mkdir(parents=True, exist_ok=True)
+            extra.extend(["--target", str(PACKAGES_DIR), "--upgrade-strategy", "only-if-needed"])
+    cmd = [py_exe, "-m", "pip", subcmd, *extra, *args[1:]] if subcmd else [py_exe, "-m", "pip"]
+    env = os.environ.copy()
+    if PACKAGES_DIR.exists():
+        prev = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = f"{PACKAGES_DIR}{os.pathsep}{prev}" if prev else str(PACKAGES_DIR)
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -357,6 +422,7 @@ def _run_pip(
         encoding="utf-8",
         errors="replace",
         bufsize=1,
+        env=env,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     lines: List[str] = []
@@ -382,6 +448,8 @@ def _run_pip(
     rc = proc.wait()
     if rc != 0:
         raise RuntimeError(_extract_pip_error(lines, rc))
+    if PACKAGES_DIR.exists():
+        site.addsitedir(str(PACKAGES_DIR))
     importlib.invalidate_caches()
 
 
@@ -832,6 +900,8 @@ def _get_liteparse(model_id: str) -> LiteParse:
                 tessdata_path=str(data_dir),
                 ocr_language="+".join(langs),
                 output_format="markdown",
+                preserve_very_small_text=True,
+                ocr_despeckle_scans=False,
                 quiet=True,
             )
         else:
@@ -841,6 +911,8 @@ def _get_liteparse(model_id: str) -> LiteParse:
             _liteparse_cache[model_id] = LiteParse(
                 ocr_backend="ocria-nano",
                 output_format="markdown",
+                preserve_very_small_text=True,
+                ocr_despeckle_scans=False,
                 quiet=True,
             )
     return _liteparse_cache[model_id]
@@ -930,15 +1002,51 @@ def fetch_remote_models(base_url: str, api_key: str = "") -> List[str]:
     return names
 
 
+def _preprocess_ocr_image(
+    image: Image.Image,
+    allow_invert: bool = True,
+    upscale_small: bool = True,
+) -> Image.Image:
+    """Normalize dark-mode screenshots, upscale crisp UI text, and pad edges for accurate OCR."""
+    im = image.convert("RGB")
+    w, h = im.size
+    strip_h = min(4, h)
+    strip = Image.new("RGB", (w, strip_h * 2))
+    strip.paste(im.crop((0, 0, w, strip_h)), (0, 0))
+    strip.paste(im.crop((0, max(0, h - strip_h), w, h)), (0, strip_h))
+    med = ImageStat.Stat(strip).median
+    r, g, b = int(med[0]), int(med[1]), int(med[2])
+    luma = 0.299 * r + 0.587 * g + 0.114 * b
+
+    if allow_invert and luma < 115.0:
+        luma_stat = ImageStat.Stat(im.convert("L"))
+        if luma_stat.extrema[0][1] - luma > 40.0:
+            im = ImageOps.invert(im)
+            r, g, b = 255 - r, 255 - g, 255 - b
+
+    if upscale_small:
+        m = max(w, h)
+        if m < 900:
+            im = im.resize((w * 2, h * 2), Image.Resampling.BICUBIC)
+        elif m < 1500:
+            im = im.resize((int(w * 1.5), int(h * 1.5)), Image.Resampling.BICUBIC)
+
+    return ImageOps.expand(im, border=24, fill=(r, g, b))
+
+
+def _clean_ocr_text(text: str) -> str:
+    lines = [ln.rstrip() for ln in text.splitlines()]
+    joined = "\n".join(lines).strip()
+    return re.sub(r"\n{3,}", "\n\n", joined)
+
+
 def _extract_liteparse(image: Image.Image, model_id: str, output_format: str) -> str:
-    if image.width < 48 or image.height < 36:
-        edge_color = image.getpixel((0, 0))
-        image = ImageOps.expand(image, border=14, fill=edge_color)
+    prepared = _preprocess_ocr_image(image, allow_invert=True, upscale_small=True)
 
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
         tmp_path = tmp.name
     try:
-        image.save(tmp_path, format="PNG")
+        prepared.save(tmp_path, format="PNG")
         with _engine_lock:
             result = _get_liteparse(model_id).parse(tmp_path)
     finally:
@@ -949,15 +1057,16 @@ def _extract_liteparse(image: Image.Image, model_id: str, output_format: str) ->
 
     if output_format == "text":
         parts = [p.text for p in result.pages if p.text]
-        return "\n".join(parts).strip()
+        return _clean_ocr_text("\n".join(parts))
 
     parts = [p.markdown or p.text for p in result.pages if (p.markdown or p.text)]
-    return ("\n\n".join(parts) if parts else result.text).strip()
+    return _clean_ocr_text("\n\n".join(parts) if parts else result.text)
 
 
 def _extract_rapidocr(image: Image.Image, model_id: str, output_format: str) -> str:
+    prepared = _preprocess_ocr_image(image, allow_invert=True, upscale_small=False)
     buf = io.BytesIO()
-    image.save(buf, format="PNG")
+    prepared.save(buf, format="PNG")
     with _engine_lock:
         engine = _get_rapidocr(model_id)
         res = engine(buf.getvalue())
@@ -968,10 +1077,10 @@ def _extract_rapidocr(image: Image.Image, model_id: str, output_format: str) -> 
         try:
             md = res.to_markdown()
             if md and md.strip():
-                return md.strip()
+                return _clean_ocr_text(md)
         except Exception:
             pass
-    return "\n".join(t for t in res.txts if t).strip()
+    return _clean_ocr_text("\n".join(t for t in res.txts if t))
 
 
 def _extract_easyocr(image: Image.Image, model_id: str) -> str:

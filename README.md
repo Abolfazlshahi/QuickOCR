@@ -41,34 +41,33 @@
 
 ### Installation
 
-#### Windows
-Download **`QuickOCR-v1.1.0-Windows.zip`** from [Releases](https://github.com/Abolfazlshahi/QuickOCR/releases), extract it anywhere, and double-click **`Setup.bat`** — or clone directly:
+#### Windows (No Python Required)
+- **Installer (Recommended):** Download **`QuickOCR-v1.2.0-Windows-Setup.exe`** from [Releases](https://github.com/Abolfazlshahi/QuickOCR/releases) and run it directly — creates Start Menu & Desktop icons with bundled runtime and `pip` (supports installing extra models like `Surya OCR` & `EasyOCR` right inside the app folder).
+- **Portable:** Download **`QuickOCR-v1.2.0-Windows-Portable.zip`**, extract anywhere, and double-click **`QuickOCR.exe`**.
+- **From Source:**
+  ```powershell
+  git clone https://github.com/Abolfazlshahi/QuickOCR.git
+  cd QuickOCR
+  .\Setup.bat
+  ```
 
-```powershell
-git clone https://github.com/Abolfazlshahi/QuickOCR.git
-cd QuickOCR
-.\Setup.bat
-```
+Run **`Uninstall.bat`** (or Windows Apps & Features if installed with Setup.exe) to remove QuickOCR.
 
-`Setup.bat` automatically:
-1. Creates `.venv` and installs dependencies from `requirements.txt`.
-2. Verifies the bundled offline `models/ocria-nano` weights.
-3. Fetches the standalone non-MSIX Python 3.11 runtime and compiles `QuickOCR.exe`.
-4. Creates Desktop & Start Menu shortcuts and starts QuickOCR in the System Tray.
-
-Run **`Uninstall.bat`** to stop QuickOCR and remove its shortcuts.
-
-#### Linux
-Download **`QuickOCR-v1.1.0-Linux.tar.gz`** from [Releases](https://github.com/Abolfazlshahi/QuickOCR/releases), extract it, and run **`./setup_linux.sh`**:
-
-```bash
-tar -xzf QuickOCR-v1.1.0-Linux.tar.gz
-cd QuickOCR
-chmod +x setup_linux.sh QuickOCR.sh
-./setup_linux.sh
-```
-
-`setup_linux.sh` creates `.venv`, installs dependencies, verifies the offline Linux `ocria-nano` runtime, and registers the desktop application icon. On Wayland desktops, bind a system keyboard shortcut to `"/path/to/QuickOCR.sh" --snip`.
+#### Linux (No System Python Required)
+- **Single-File Binary (`AppImage`):** Download **`QuickOCR-v1.2.0-Linux-x86_64.AppImage`** from [Releases](https://github.com/Abolfazlshahi/QuickOCR/releases):
+  ```bash
+  chmod +x QuickOCR-v1.2.0-Linux-x86_64.AppImage
+  ./QuickOCR-v1.2.0-Linux-x86_64.AppImage
+  ```
+  Extra downloaded models & optional packages persist cleanly in `~/.local/share/QuickOCR`.
+- **Portable Bundle:** Download **`QuickOCR-v1.2.0-Linux-Portable.tar.gz`**, extract, and run `./QuickOCR`.
+- **From Source:**
+  ```bash
+  git clone https://github.com/Abolfazlshahi/QuickOCR.git
+  cd QuickOCR
+  ./setup_linux.sh
+  ```
+  On Wayland desktops, bind a system shortcut to `QuickOCR --snip`.
 
 ---
 
@@ -82,11 +81,13 @@ chmod +x setup_linux.sh QuickOCR.sh
 | `ocr_engine.py` | Multi-backend OCR catalog (`ocria-nano`, `Surya OCR`, `EasyOCR`, `PP-OCRv6/v5/v4`, `Tesseract Best/Fast`, `Marker`, `openai_vision`) |
 | `models_dialog.py` | Embedded Model Manager page with Recommended/category filters, live `%` progress bar, VLM presets & 1-click install |
 | `updater.py` | GitHub Release version checker, cross-platform archive fetcher, safe updater & auto-restart |
-| `setup_linux.sh` | Linux virtual environment setup & XDG desktop integration |
-| `QuickOCR.sh` | Linux launcher script (supports `--minimized` and `--snip` IPC) |
+| `installer.iss` | Inno Setup 6 Windows single-file installer specification |
+| `setup_linux.sh` | Linux virtual environment setup & XDG desktop integration (from source) |
+| `QuickOCR.sh` | Linux shell launcher (supports `--minimized`, `--snip` IPC, `--version`) |
 | `CHANGELOG.md` | Release history & automated GitHub Release notes source |
 | `i18n.py` | Trilingual dictionary (`fa`, `en`, `zh`) |
 | `launcher.cs` | Native x64 Windows host loading `python311.dll` in-process |
+| `launcher_linux.c` | Native ELF Linux host (`QuickOCR`) launching bundled Python runtime |
 | `models/ocria-nano/` | Bundled offline OCRia-nano-1 ONNX weights & runtime |
 | `assets/fonts/` | Bundled Vazirmatn static TTF font family |
 | `check_ocr.py` | Automated end-to-end UI, RTL pill, model manager, snip, and OCR verification check |

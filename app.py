@@ -77,7 +77,8 @@ from ui_kit import (
 )
 
 BASE_DIR = Path(__file__).resolve().parent
-CONFIG_PATH = BASE_DIR / "config.json"
+DATA_DIR = ocr_engine.DATA_DIR
+CONFIG_PATH = DATA_DIR / "config.json"
 ICON_PATH = BASE_DIR / "icon.ico"
 LOGO_PATH = BASE_DIR / "assets" / "logo.png"
 FONTS_DIR = BASE_DIR / "assets" / "fonts"
@@ -108,12 +109,13 @@ def set_app_user_model_id() -> None:
 
 
 def _open_app_folder() -> None:
+    target = str(DATA_DIR)
     if sys.platform == "win32":
-        os.startfile(str(BASE_DIR))
+        os.startfile(target)
     elif sys.platform == "darwin":
-        subprocess.Popen(["open", str(BASE_DIR)])
+        subprocess.Popen(["open", target])
     else:
-        subprocess.Popen(["xdg-open", str(BASE_DIR)])
+        subprocess.Popen(["xdg-open", target])
 
 
 def _play_beep(ok: bool = True) -> None:
@@ -221,8 +223,17 @@ def set_autostart(enabled: bool) -> None:
     desktop_file = get_linux_autostart_path()
     if enabled:
         desktop_file.parent.mkdir(parents=True, exist_ok=True)
+        appimage = os.environ.get("APPIMAGE")
+        bin_path = BASE_DIR / "QuickOCR"
         sh_path = BASE_DIR / "QuickOCR.sh"
-        exec_cmd = f'"{sh_path}" --minimized' if sh_path.exists() else f'"{sys.executable}" "{APP_SCRIPT}" --minimized'
+        if appimage:
+            exec_cmd = f'"{appimage}" --minimized'
+        elif bin_path.exists():
+            exec_cmd = f'"{bin_path}" --minimized'
+        elif sh_path.exists():
+            exec_cmd = f'"{sh_path}" --minimized'
+        else:
+            exec_cmd = f'"{sys.executable}" "{APP_SCRIPT}" --minimized'
         desktop_file.write_text(
             "[Desktop Entry]\n"
             "Type=Application\n"
@@ -311,8 +322,12 @@ class QuickOCRWindow(QWidget):
         self._available_release: Optional[updater.ReleaseInfo] = None
         self._update_busy = False
 
-        make_app_icon(ICON_PATH, LOGO_PATH)
-        self.app_icon = QIcon(str(ICON_PATH))
+        if DATA_DIR == BASE_DIR or not ICON_PATH.exists() or not LOGO_PATH.exists():
+            icon_out = ICON_PATH if DATA_DIR == BASE_DIR else DATA_DIR / "icon.ico"
+            logo_out = LOGO_PATH if DATA_DIR == BASE_DIR else DATA_DIR / "logo.png"
+            make_app_icon(icon_out, logo_out)
+        icon_src = LOGO_PATH if (sys.platform != "win32" and LOGO_PATH.exists()) else ICON_PATH
+        self.app_icon = QIcon(str(icon_src))
         self.qapp.setWindowIcon(self.app_icon)
 
         self.setObjectName("MainRoot")
@@ -1219,6 +1234,9 @@ def _notify_existing_instance(command: bytes = b"SHOW") -> bool:
 
 
 def main() -> None:
+    if "--version" in sys.argv:
+        print(f"QuickOCR v{updater.APP_VERSION}")
+        return
     set_app_user_model_id()
     qapp = QApplication(sys.argv)
     qapp.setQuitOnLastWindowClosed(False)

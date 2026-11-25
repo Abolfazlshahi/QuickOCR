@@ -44,7 +44,9 @@ if not exist "runtime\python311.dll" (
     > "runtime\python311._pth" (
         echo python311.zip
         echo .
+        echo Lib\site-packages
         echo ..
+        echo ..\packages
         echo ..\.venv\Lib\site-packages
         echo import site
     )

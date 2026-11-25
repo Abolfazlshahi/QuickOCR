@@ -22,7 +22,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Fetch non-MSIX Python 3.11 host runtime
+      - name: Build self-contained non-MSIX Python 3.11 runtime + deps
         shell: powershell
         run: |
           New-Item -ItemType Directory -Force -Path "runtime" | Out-Null
@@ -32,10 +32,16 @@ jobs:
           @"
           python311.zip
           .
+          Lib\site-packages
           ..
+          ..\packages
           ..\.venv\Lib\site-packages
           import site
           "@ | Set-Content -Path "runtime\python311._pth" -Encoding ASCII
+          Invoke-WebRequest -Uri "https://bootstrap.pypa.io/get-pip.py" -OutFile "runtime\get-pip.py" -UseBasicParsing
+          & "runtime\python.exe" "runtime\get-pip.py" --no-cache-dir --no-warn-script-location
+          Remove-Item "runtime\get-pip.py"
+          & "runtime\python.exe" -m pip install --no-cache-dir --no-warn-script-location -r requirements.txt
 
       - name: Compile QuickOCR x64 launcher
         shell: powershell
@@ -43,10 +49,18 @@ jobs:
           $csc = "$env:SystemRoot\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
           & $csc /nologo /target:winexe /platform:x64 /win32icon:"icon.ico" /reference:System.Windows.Forms.dll /out:"QuickOCR.exe" "launcher.cs"
 
-      - name: Package Windows release zip
+      - name: Run standalone Windows verification suite
+        shell: powershell
+        run: |
+          & "runtime\python.exe" check_ocr.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Remove-Item "config.json" -ErrorAction SilentlyContinue
+
+      - name: Package self-contained Portable zip and Windows-Setup.exe
         shell: powershell
         run: |
           $tag = $env:GITHUB_REF_NAME
+          $ver = $tag.TrimStart('v')
           $stage = Join-Path $env:RUNNER_TEMP "QuickOCR"
           if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
@@ -62,13 +76,20 @@ jobs:
               Copy-Item -Path $it -Destination (Join-Path $stage $it) -Recurse -Force
             }
           }
-          Compress-Archive -Path $stage -DestinationPath "QuickOCR-$tag-Windows.zip" -Force
+          Compress-Archive -Path $stage -DestinationPath "QuickOCR-$tag-Windows-Portable.zip" -Force
 
-      - name: Upload Windows asset
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          & $iscc "/DMyAppVersion=$ver" "/DSourceDir=$stage" "installer.iss"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
           name: windows-dist
-          path: QuickOCR-*-Windows.zip
+          path: |
+            QuickOCR-*-Windows-Portable.zip
+            QuickOCR-*-Windows-Setup.exe
 
   build-linux:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -77,49 +98,78 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install Linux Qt/X11 & clipboard runtime libs
+      - name: Install Linux Qt/X11 & build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb xclip libxcb-cursor0 libxkbcommon-x11-0 \
-            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
-            libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libgl1 libegl1
+          sudo apt-get install -y gcc xvfb xclip desktop-file-utils libxcb-cursor0 \
+            libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 \
+            libgl1 libegl1 libfontconfig1 libdbus-1-3 zlib1g
 
-      - name: Install dependencies and pull Linux ocria-nano runtime
+      - name: Fetch standalone Python 3.11 runtime + deps & compile ELF launcher
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          PBS_URL=$(python3 -c "import json, re, urllib.request; assets = json.loads(urllib.request.urlopen('https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest').read())['assets']; m = [a['browser_download_url'] for a in assets if re.search(r'cpython-3\.11\.\d+\+\d+-x86_64-unknown-linux-gnu-install_only_stripped\.tar\.gz$', a['name'])]; print(m[0] if m else 'https://github.com/astral-sh/python-build-standalone/releases/download/20261124/cpython-3.11.18%2B20261124-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz')")
+          curl -fL "$PBS_URL" -o pbs.tar.gz
+          mkdir -p runtime
+          tar --strip-components=1 -C runtime -xzf pbs.tar.gz
+          rm -f pbs.tar.gz
+          runtime/bin/python3 -m pip --version || runtime/bin/python3 -m ensurepip --upgrade
+          runtime/bin/python3 -m pip install --no-cache-dir --upgrade pip
+          runtime/bin/python3 -m pip install --no-cache-dir -r requirements.txt
+          gcc -O2 -Wall launcher_linux.c -o QuickOCR
+          chmod +x QuickOCR QuickOCR.sh setup_linux.sh
           rm -rf models/ocria-nano/runtime
-          LITEPARSE_MODEL_DIR="$PWD/models" lit models pull ocria-nano
+          LITEPARSE_MODEL_DIR="$PWD/models" runtime/bin/lit models pull ocria-nano
 
-      - name: Run headless Qt/OCR verification on Linux
+      - name: Run standalone headless Qt/OCR checks on Linux
         run: |
-          LITEPARSE_MODEL_DIR="$PWD/models" xvfb-run -a python check_ocr.py
+          LITEPARSE_MODEL_DIR="$PWD/models" xvfb-run -a runtime/bin/python3 check_ocr.py
+          rm -f config.json
 
-      - name: Package Linux release tar.gz
+      - name: Package self-contained Linux Portable tar.gz & AppImage
         run: |
           tag="${GITHUB_REF_NAME}"
           stage="${RUNNER_TEMP}/QuickOCR"
           rm -rf "$stage"
           mkdir -p "$stage"
-          chmod +x QuickOCR.sh setup_linux.sh
           for item in app.py ui_kit.py snipper.py ocr_engine.py models_dialog.py \
-                      updater.py i18n.py check_ocr.py QuickOCR.sh setup_linux.sh \
-                      requirements.txt icon.ico README.md CHANGELOG.md LICENSE \
-                      assets models; do
+                      updater.py i18n.py check_ocr.py launcher_linux.c QuickOCR \
+                      QuickOCR.sh setup_linux.sh requirements.txt icon.ico \
+                      README.md CHANGELOG.md LICENSE assets models runtime; do
             cp -a "$item" "$stage/"
           done
-          tar -C "${RUNNER_TEMP}" -czf "QuickOCR-${tag}-Linux.tar.gz" QuickOCR
+          tar -C "${RUNNER_TEMP}" -czf "QuickOCR-${tag}-Linux-Portable.tar.gz" QuickOCR
 
-      - name: Upload Linux asset
+          appdir="${RUNNER_TEMP}/QuickOCR.AppDir"
+          rm -rf "$appdir"
+          cp -a "$stage" "$appdir"
+          ln -sf QuickOCR "$appdir/AppRun"
+          cp "$appdir/assets/logo.png" "$appdir/quickocr.png"
+          cp "$appdir/assets/logo.png" "$appdir/.DirIcon"
+          cat > "$appdir/quickocr.desktop" <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=QuickOCR
+          Comment=Minimal pure-black trilingual offline OCR utility
+          Exec=QuickOCR
+          Icon=quickocr
+          Categories=Utility;Graphics;
+          Terminal=false
+          EOF
+          curl -fL "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage" -o appimagetool.AppImage
+          chmod +x appimagetool.AppImage
+          ARCH=x86_64 ./appimagetool.AppImage --appimage-extract-and-run "$appdir" "QuickOCR-${tag}-Linux-x86_64.AppImage"
+          chmod +x "QuickOCR-${tag}-Linux-x86_64.AppImage"
+          ./QuickOCR-${tag}-Linux-x86_64.AppImage --appimage-extract-and-run --version
+          rm -f appimagetool.AppImage
+
+      - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
         with:
           name: linux-dist
-          path: QuickOCR-*-Linux.tar.gz
+          path: |
+            QuickOCR-*-Linux-Portable.tar.gz
+            QuickOCR-*-Linux-x86_64.AppImage
 
   publish-release:
     needs: [build-windows, build-linux]
@@ -147,10 +197,16 @@ jobs:
           text = Path("CHANGELOG.md").read_text(encoding="utf-8")
           m = re.search(rf"^##\s+{re.escape(tag)}\s*\n(.*?)(?=^##\s+v|\Z)", text, re.S | re.M)
           notes = m.group(1).strip() if m else f"QuickOCR {tag}"
-          notes += f"\n\n### Downloads\n- **Windows:** `QuickOCR-{tag}-Windows.zip` (extract & run `Setup.bat`)\n- **Linux:** `QuickOCR-{tag}-Linux.tar.gz` (extract & run `./setup_linux.sh`)\n"
+          notes += (
+              f"\n\n### Downloads (Zero-Setup / Self-Contained)\n"
+              f"- **Windows Installer:** `QuickOCR-{tag}-Windows-Setup.exe` (one-click native installer, no Python required)\n"
+              f"- **Windows Portable:** `QuickOCR-{tag}-Windows-Portable.zip` (extract & double-click `QuickOCR.exe`)\n"
+              f"- **Linux AppImage:** `QuickOCR-{tag}-Linux-x86_64.AppImage` (`chmod +x` & run — single-file native Linux binary)\n"
+              f"- **Linux Portable:** `QuickOCR-{tag}-Linux-Portable.tar.gz` (extract & run `./QuickOCR`, includes standalone Python + `pip`)\n"
+          )
           Path("release_notes.md").write_text(notes, encoding="utf-8")
           PY
-          gh release create "$tag" dist/QuickOCR-${tag}-Windows.zip dist/QuickOCR-${tag}-Linux.tar.gz \
+          gh release create "$tag" dist/QuickOCR-${tag}-* \
             --title "QuickOCR $tag" --notes-file release_notes.md
 
       - name: Backfill release notes on prior releases if needed
@@ -161,7 +217,7 @@ jobs:
           import json, re, subprocess
           from pathlib import Path
           text = Path("CHANGELOG.md").read_text(encoding="utf-8")
-          for old_tag in ("v1.0.0", "v1.0.1", "v1.0.2", "v1.0.3"):
+          for old_tag in ("v1.0.0", "v1.0.1", "v1.0.2", "v1.0.3", "v1.1.0"):
               m = re.search(rf"^##\s+{re.escape(old_tag)}\s*\n(.*?)(?=^##\s+v|\Z)", text, re.S | re.M)
               if not m:
                   continue
@@ -196,7 +252,7 @@ jobs:
           import re, subprocess
           from pathlib import Path
           text = Path("CHANGELOG.md").read_text(encoding="utf-8")
-          for old_tag in ("v1.0.0", "v1.0.1", "v1.0.2", "v1.0.3", "v1.1.0"):
+          for old_tag in ("v1.0.0", "v1.0.1", "v1.0.2", "v1.0.3", "v1.1.0", "v1.2.0"):
               m = re.search(rf"^##\s+{re.escape(old_tag)}\s*\n(.*?)(?=^##\s+v|\Z)", text, re.S | re.M)
               if not m:
                   continue
