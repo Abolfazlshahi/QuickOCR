@@ -4,6 +4,17 @@ All notable changes to **QuickOCR** are documented here.
 
 ---
 
+## v1.3.0
+
+### Highlights
+- **Flagship `OCRia-1` (4B VLM — Q8_0 GGUF) Added to Recommended Hub (`ocr_engine.py`, `models_dialog.py`)**:
+  - Added **`OCRia-1 (4B Flagship GGUF)`** (`llamaindex/OCRia-1-GGUF` — the full 4-billion-parameter teacher model behind `OCRia-nano-1`) directly inside the **Recommended (`★`)** tab with 1-click installation.
+  - Automatically downloads the official `ggml-org/llama.cpp` prebuilt server binary (`win-cpu-x64` / `ubuntu-x64`), `mmproj-OCRia-1-f16.gguf`, and `OCRia-1-Q8_0.gguf` (`~5.5 GB`), running locally on demand with clean process shutdown (`shutdown_engines()`).
+  - Upgraded `download_file` with **HTTP `Range` resume** (`206 Partial Content` / `.part` checkpointing) so multi-gigabyte downloads resume cleanly after network drops.
+- **Vision API Quick Preset**: Added **`llamaindex/ocria-1`** 1-click preset chip in the Vision API / Ollama tab.
+
+---
+
 ## v1.2.0
 
 ### Highlights

@@ -29,12 +29,13 @@
 - **1-Click Multi-Model Hub (`Recommended ★` / `All` / `Fast` / `Accurate` / `Vision API`)**:
   - **Recommended (`★`) Curated View**: Opens directly on top picks balancing ultra-fast CPU inference, best Persian/Arabic RTL precision, EN/ZH accuracy, and academic layout parsing, with live percentage progress bars (`0–100%`) and resilient retry diagnostics.
   - **OCRia-nano-1** *(Default, bundled offline — 45.6 MB)*: Ultra-fast CPU inference for Persian/Arabic, English, CJK & Markdown tables.
+  - **OCRia-1 (4B Flagship GGUF — ~5.5 GB)**: The full 4B-parameter teacher VLM behind `OCRia-nano-1` (`llamaindex/OCRia-1-GGUF`, Q8_0 + `llama-server` auto-setup with resumable HTTP Range downloads) — top ParseBench accuracy for multilingual documents, complex tables, charts, and math formulas.
   - **Surya OCR (Multilingual SOTA — ~1.2 GB)**: High-precision neural line detection and RTL recognition across Persian, Arabic & 90+ languages.
   - **Tesseract Best LSTM (5-Lang RTL — ~75 MB)** & **Tesseract Fast (4-Lang)**: Automatically downloads `tessdata_best` (`fas`, `ara`, `eng`, `chi_sim`, `rus`) or lightweight `tessdata_fast` packs.
   - **EasyOCR Neural Packs (`FA + EN`, `AR + FA + EN`, `RU + ZH + EN`)**: Neural scene-text readers tuned for screenshots, mixed RTL text, and busy backgrounds.
   - **PP-OCRv6 (`Tiny` / `Small` / `Medium`)**, **PP-OCRv5 (`Persian/Arabic`, `Russian/Cyrillic`, `English`, `Server HD`)**, & **PP-OCRv4 (`Persian/Arabic`)**: RapidOCR ONNX models across lightweight and server tiers.
   - **Marker (`marker-pdf`)**: Deep layout analysis, complex tables, and mathematical equations converted cleanly to Markdown.
-  - **Custom Vision LLMs**: Connect **LM Studio** (`localhost:1234/v1`), **Ollama** (`localhost:11434/v1`), or any OpenAI-compatible Vision API with 1-click presets (`qwen2.5-vl`, `deepseek-ocr`, `MedAIBase/PaddleOCR-VL`, `richardyoung/olmocr2:7b-q8`) and automatic `/v1/models` detection.
+  - **Custom Vision LLMs**: Connect **LM Studio** (`localhost:1234/v1`), **Ollama** (`localhost:11434/v1`), or any OpenAI-compatible Vision API with 1-click presets (`llamaindex/ocria-1`, `qwen2.5-vl`, `deepseek-ocr`, `MedAIBase/PaddleOCR-VL`, `richardyoung/olmocr2:7b-q8`) and automatic `/v1/models` detection.
 - **Trilingual Animated UI**: Instant live switching between **Persian (`فارسی` RTL with bundled Vazirmatn)**, **English**, and **Simplified Chinese (`中文`)** with smooth page-slide, toggle, segmented-pill, and window animations.
 
 ---
@@ -42,8 +43,8 @@
 ### Installation
 
 #### Windows (No Python Required)
-- **Installer (Recommended):** Download **`QuickOCR-v1.2.0-Windows-Setup.exe`** from [Releases](https://github.com/Abolfazlshahi/QuickOCR/releases) and run it directly — creates Start Menu & Desktop icons with bundled runtime and `pip` (supports installing extra models like `Surya OCR` & `EasyOCR` right inside the app folder).
-- **Portable:** Download **`QuickOCR-v1.2.0-Windows-Portable.zip`**, extract anywhere, and double-click **`QuickOCR.exe`**.
+- **Installer (Recommended):** Download **`QuickOCR-v1.3.0-Windows-Setup.exe`** from [Releases](https://github.com/Abolfazlshahi/QuickOCR/releases) and run it directly — creates Start Menu & Desktop icons with bundled runtime and `pip` (supports installing extra models like `OCRia-1`, `Surya OCR` & `EasyOCR` right inside the app folder).
+- **Portable:** Download **`QuickOCR-v1.3.0-Windows-Portable.zip`**, extract anywhere, and double-click **`QuickOCR.exe`**.
 - **From Source:**
   ```powershell
   git clone https://github.com/Abolfazlshahi/QuickOCR.git
@@ -54,13 +55,13 @@
 Run **`Uninstall.bat`** (or Windows Apps & Features if installed with Setup.exe) to remove QuickOCR.
 
 #### Linux (No System Python Required)
-- **Single-File Binary (`AppImage`):** Download **`QuickOCR-v1.2.0-Linux-x86_64.AppImage`** from [Releases](https://github.com/Abolfazlshahi/QuickOCR/releases):
+- **Single-File Binary (`AppImage`):** Download **`QuickOCR-v1.3.0-Linux-x86_64.AppImage`** from [Releases](https://github.com/Abolfazlshahi/QuickOCR/releases):
   ```bash
-  chmod +x QuickOCR-v1.2.0-Linux-x86_64.AppImage
-  ./QuickOCR-v1.2.0-Linux-x86_64.AppImage
+  chmod +x QuickOCR-v1.3.0-Linux-x86_64.AppImage
+  ./QuickOCR-v1.3.0-Linux-x86_64.AppImage
   ```
   Extra downloaded models & optional packages persist cleanly in `~/.local/share/QuickOCR`.
-- **Portable Bundle:** Download **`QuickOCR-v1.2.0-Linux-Portable.tar.gz`**, extract, and run `./QuickOCR`.
+- **Portable Bundle:** Download **`QuickOCR-v1.3.0-Linux-Portable.tar.gz`**, extract, and run `./QuickOCR`.
 - **From Source:**
   ```bash
   git clone https://github.com/Abolfazlshahi/QuickOCR.git

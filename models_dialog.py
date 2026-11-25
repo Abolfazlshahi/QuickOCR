@@ -269,8 +269,9 @@ class ModelsView(QWidget):
         cc.addWidget(self.model_combo)
 
         for chip_pair in (
-            ("qwen2.5-vl", "deepseek-ocr"),
-            ("MedAIBase/PaddleOCR-VL", "richardyoung/olmocr2:7b-q8"),
+            ("llamaindex/ocria-1", "qwen2.5-vl"),
+            ("deepseek-ocr", "MedAIBase/PaddleOCR-VL"),
+            ("richardyoung/olmocr2:7b-q8",),
         ):
             vlm_row = QHBoxLayout()
             vlm_row.setSpacing(6)

@@ -1207,6 +1207,7 @@ class QuickOCRWindow(QWidget):
     def quit_app(self) -> None:
         if hasattr(self, "_update_check_timer"):
             self._update_check_timer.stop()
+        ocr_engine.shutdown_engines()
         try:
             keyboard.unhook_all()
         except Exception:

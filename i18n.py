@@ -95,6 +95,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "msg_update_err": "خطا در بررسی آپدیت",
         # Model descriptions
         "desc_ocria_nano": "مدل پیش‌فرض فوق‌سبک CPU • فارسی، انگلیسی، چینی، عربی و جدول (۴۵.۶ MB)",
+        "desc_ocria_1": "نسخهٔ مادر و پرچمدار ۴ میلیاردی OCRia-nano • دقت فوق‌العاده برای چندزبان، جداول و فرمول (~5.5 GB)",
         "desc_ppocrv6_tiny": "فوق‌سریع و کم‌حجم نسل ۶ • مناسب انگلیسی، چینی و زبان‌های لاتین (~6 MB)",
         "desc_ppocrv6_small": "تعادل عالی سرعت و دقت نسل ۶ • انگلیسی، چینی و لاتین (~14 MB)",
         "desc_ppocrv6_medium": "بالاترین دقت PP-OCRv6 • مناسب متون پیچیده انگلیسی و چینی (~34 MB)",
@@ -199,6 +200,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "msg_update_err": "Update check failed",
         # Model descriptions
         "desc_ocria_nano": "Default CPU pipeline • Persian, English, CJK & tables (45.6 MB)",
+        "desc_ocria_1": "Flagship 4B teacher VLM of OCRia-nano • Top accuracy for multilingual text, tables & math (~5.5 GB)",
         "desc_ppocrv6_tiny": "Next-gen ultra-fast PP-OCRv6 Tiny • EN, ZH & Latin (~6 MB)",
         "desc_ppocrv6_small": "Balanced PP-OCRv6 Small • High accuracy for EN, ZH & Latin (~14 MB)",
         "desc_ppocrv6_medium": "Top-tier PP-OCRv6 Medium • Dense EN, ZH & Latin text (~34 MB)",
@@ -303,6 +305,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "msg_update_err": "检查更新失败",
         # Model descriptions
         "desc_ocria_nano": "默认超轻量 CPU 引擎 • 波斯语、英语、中日韩文与表格 (45.6 MB)",
+        "desc_ocria_1": "OCRia-nano 的 4B 旗舰视觉母模型 • 顶级多语言文本、复杂表格、图表与公式精度 (~5.5 GB)",
         "desc_ppocrv6_tiny": "新一代超快 PP-OCRv6 Tiny • 中英文与拉丁语系 (~6 MB)",
         "desc_ppocrv6_small": "均衡型 PP-OCRv6 Small • 高精度中英文与拉丁语系 (~14 MB)",
         "desc_ppocrv6_medium": "高精度 PP-OCRv6 Medium • 复杂中英文与多语言 (~34 MB)",

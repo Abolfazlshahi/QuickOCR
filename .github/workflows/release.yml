@@ -217,7 +217,7 @@ jobs:
           import json, re, subprocess
           from pathlib import Path
           text = Path("CHANGELOG.md").read_text(encoding="utf-8")
-          for old_tag in ("v1.0.0", "v1.0.1", "v1.0.2", "v1.0.3", "v1.1.0"):
+          for old_tag in ("v1.0.0", "v1.0.1", "v1.0.2", "v1.0.3", "v1.1.0", "v1.2.0"):
               m = re.search(rf"^##\s+{re.escape(old_tag)}\s*\n(.*?)(?=^##\s+v|\Z)", text, re.S | re.M)
               if not m:
                   continue

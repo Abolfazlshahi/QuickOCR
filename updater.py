@@ -17,7 +17,7 @@ import zipfile
 
 import ocr_engine
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 GITHUB_LATEST_API = "https://api.github.com/repos/Abolfazlshahi/QuickOCR/releases/latest"
 
 _PRESERVED_ROOT_NAMES = frozenset({"config.json", ".venv", "packages"})

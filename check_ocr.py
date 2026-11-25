@@ -45,6 +45,7 @@ def main() -> None:
         "msg_pip_stage",
         "msg_weights_stage",
         "msg_install_ready",
+        "desc_ocria_1",
     )
     for lang_code in LANGUAGES:
         for k in req_i18n:
@@ -117,6 +118,7 @@ def main() -> None:
     assert len(rec_models) >= 6
     for req_id in (
         "ocria-nano",
+        "ocria-1",
         "surya-ocr",
         "tesseract-best",
         "easyocr-fa",
@@ -198,6 +200,41 @@ def main() -> None:
         dst.unlink(missing_ok=True)
     err_msg = ocr_engine._extract_pip_error(["Collecting x", "ERROR: No matching distribution found for x"], 1)
     assert "No matching distribution" in err_msg
+
+    # Verify HTTP Range resume in download_file, markdown fence strip, and llama.cpp asset matcher
+    assert any(m["id"] == "ocria-1" and m.get("recommended") for m in ocr_engine.MODEL_CATALOG)
+    assert ocr_engine._strip_markdown_fence("```markdown\n# Title\nBody\n```") == "# Title\nBody"
+    assert ocr_engine._select_llamacpp_asset(
+        [{"name": "llama-b1-bin-win-cpu-x64.zip", "browser_download_url": "https://x/w.zip"},
+         {"name": "llama-b1-bin-ubuntu-x64.tar.gz", "browser_download_url": "https://x/l.tgz"}],
+        "win32",
+    )[1].endswith("win-cpu-x64.zip")
+    class _RangeH(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            rng = self.headers.get("Range", "")
+            start = int(rng.replace("bytes=", "").split("-")[0]) if rng.startswith("bytes=") else 0
+            chunk = payload[start:]
+            self.send_response(206 if start > 0 else 200)
+            self.send_header("Content-Length", str(len(chunk)))
+            self.end_headers()
+            self.wfile.write(chunk)
+        def log_message(self, *args):
+            pass
+    srv2 = socketserver.TCPServer(("127.0.0.1", 0), _RangeH)
+    t2 = threading.Thread(target=srv2.handle_request, daemon=True)
+    t2.start()
+    with tempfile.NamedTemporaryFile(delete=False) as tf2:
+        dst2 = Path(tf2.name)
+    try:
+        dst2.unlink(missing_ok=True)
+        part2 = dst2.with_suffix(dst2.suffix + ".part")
+        part2.write_bytes(payload[:2048])
+        ocr_engine.download_file(f"http://127.0.0.1:{srv2.server_address[1]}/big.bin", dst2, resume=True)
+        assert dst2.read_bytes() == payload
+    finally:
+        srv2.server_close()
+        dst2.unlink(missing_ok=True)
+        dst2.with_suffix(dst2.suffix + ".part").unlink(missing_ok=True)
 
     for i in range(mv.cards_layout.count()):
         card_w = mv.cards_layout.itemAt(i).widget().minimumSizeHint().width()

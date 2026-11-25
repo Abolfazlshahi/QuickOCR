@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import base64
 import importlib
 import importlib.util
@@ -11,11 +12,15 @@ import os
 import re
 import shutil
 import site
+import socket
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
+import time
 import urllib.request
+import zipfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -57,6 +62,7 @@ if PACKAGES_DIR.exists():
     site.addsitedir(str(PACKAGES_DIR))
 
 MODEL_DIR = DATA_DIR / "models"
+OCRIA1_DIR = MODEL_DIR / "ocria-1"
 RAPID_DIR = MODEL_DIR / "rapidocr"
 TESSDATA_DIR = MODEL_DIR / "tessdata"
 TESSBEST_DIR = MODEL_DIR / "tessdata_best"
@@ -83,6 +89,14 @@ _rapid_cache: Dict[str, Any] = {}
 _easyocr_cache: Dict[str, Any] = {}
 _surya_cache: Optional[Callable[[Image.Image], Any]] = None
 _marker_cache: Any = None
+_llama_proc: Optional[subprocess.Popen[Any]] = None
+_llama_port: Optional[int] = None
+
+_OCRIA1_HF_BASE = "https://huggingface.co/llamaindex/OCRia-1-GGUF/resolve/main"
+_OCRIA1_FALLBACK_PROMPT = (
+    "Transcribe this Page in markdown, be as accurate as possible in your transcription, "
+    "do not describe/summarize."
+)
 
 _TESS_VARIANTS: Dict[str, Tuple[Path, Tuple[str, ...], str]] = {
     "tesseract-multi": (
@@ -108,6 +122,16 @@ MODEL_CATALOG: List[Dict[str, Any]] = [
         "langs": "FA • AR • EN • ZH • +20",
         "badge": "45.6 MB • CPU",
         "kind": "liteparse_ocria",
+    },
+    {
+        "id": "ocria-1",
+        "title": "OCRia-1 (4B Flagship GGUF)",
+        "desc_key": "desc_ocria_1",
+        "category": "heavy",
+        "recommended": True,
+        "langs": "Multilingual • Tables • Math",
+        "badge": "~5.5 GB • Flagship 4B",
+        "kind": "ocria_1",
     },
     {
         "id": "surya-ocr",
@@ -322,18 +346,27 @@ def download_file(
     on_progress: ProgressCallback = None,
     timeout: float = 120.0,
     label: str = "",
+    resume: bool = False,
 ) -> Path:
-    """Stream url to dest atomically via .part file while reporting 0..100% progress."""
+    """Stream url to dest atomically via .part file while reporting 0..100% (supports Range resume)."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_suffix(dest.suffix + ".part")
-    req = urllib.request.Request(url, headers={"User-Agent": "QuickOCR"})
+    existing = part.stat().st_size if (resume and part.exists()) else 0
+    headers = {"User-Agent": "QuickOCR"}
+    if existing > 0:
+        headers["Range"] = f"bytes={existing}-"
+    req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            total = int(resp.headers.get("Content-Length") or 0)
-            read = 0
+            status = getattr(resp, "status", 200)
+            resuming = status == 206 and existing > 0
+            clen = int(resp.headers.get("Content-Length") or 0)
+            total = (existing + clen) if (resuming and clen > 0) else clen
+            read = existing if resuming else 0
+            mode = "ab" if resuming else "wb"
             last_pct = -1
-            _emit_progress(on_progress, 0, label or dest.name)
-            with part.open("wb") as fh:
+            _emit_progress(on_progress, int(read * 100 / total) if total > 0 else 0, label or dest.name)
+            with part.open(mode) as fh:
                 while True:
                     chunk = resp.read(65536)
                     if not chunk:
@@ -358,7 +391,8 @@ def download_file(
         _emit_progress(on_progress, 100, label or dest.name)
         return dest
     except Exception:
-        part.unlink(missing_ok=True)
+        if not resume:
+            part.unlink(missing_ok=True)
         raise
 
 
@@ -542,6 +576,50 @@ def is_tesseract_installed(model_id: str = "tesseract-multi") -> bool:
     return _find_tesseract_exe() is not None and has_data
 
 
+def _select_llamacpp_asset(assets: List[Dict[str, Any]], platform: str = sys.platform) -> Tuple[str, str]:
+    target = "bin-win-cpu-x64.zip" if platform == "win32" else "bin-ubuntu-x64.tar.gz"
+    for asset in assets:
+        name = str(asset.get("name") or "")
+        url = str(asset.get("browser_download_url") or "")
+        if target in name.lower() and url:
+            return url, name
+    raise RuntimeError(f"Could not find {target} in official llama.cpp release")
+
+
+def _fetch_llamacpp_server_url() -> Tuple[str, str]:
+    req = urllib.request.Request(
+        "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=6",
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "QuickOCR"},
+    )
+    with urllib.request.urlopen(req, timeout=20.0) as resp:
+        releases = json.loads(resp.read().decode("utf-8"))
+    for rel in releases:
+        assets = rel.get("assets") or []
+        if len(assets) > 10:
+            return _select_llamacpp_asset(assets, sys.platform)
+    raise RuntimeError("No binary llama.cpp release available")
+
+
+def _find_ocria1_server_exe() -> Optional[Path]:
+    bin_dir = OCRIA1_DIR / "bin"
+    if not bin_dir.exists():
+        return None
+    target_name = "llama-server.exe" if sys.platform == "win32" else "llama-server"
+    for candidate in bin_dir.rglob(target_name):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def is_ocria1_installed() -> bool:
+    return (
+        _find_ocria1_server_exe() is not None
+        and (OCRIA1_DIR / "OCRia-1-Q8_0.gguf").exists()
+        and (OCRIA1_DIR / "mmproj-OCRia-1-f16.gguf").exists()
+        and (OCRIA1_DIR / ".ready").exists()
+    )
+
+
 def is_marker_installed() -> bool:
     return importlib.util.find_spec("marker") is not None
 
@@ -549,6 +627,8 @@ def is_marker_installed() -> bool:
 def is_model_installed(model_id: str) -> bool:
     if model_id == "ocria-nano":
         return is_ocria_installed()[0]
+    if model_id == "ocria-1":
+        return is_ocria1_installed()
     if model_id in _TESS_VARIANTS:
         return is_tesseract_installed(model_id)
     if model_id == "surya-ocr":
@@ -667,6 +747,75 @@ def install_model(model_id: str, on_progress: ProgressCallback = None) -> None:
     global _marker_cache, _surya_cache
     if model_id == "ocria-nano":
         pull_model(on_progress=on_progress)
+        return
+
+    if model_id == "ocria-1":
+        OCRIA1_DIR.mkdir(parents=True, exist_ok=True)
+        bin_dir = OCRIA1_DIR / "bin"
+        if _find_ocria1_server_exe() is None:
+            _emit_progress(on_progress, 1, "Fetching llama.cpp runtime...")
+            srv_url, srv_name = _fetch_llamacpp_server_url()
+            arch_path = OCRIA1_DIR / srv_name
+            download_file(
+                srv_url,
+                arch_path,
+                on_progress=lambda p, m: _emit_progress(on_progress, int(p * 0.05), m),
+                timeout=120.0,
+                label="llama-server runtime",
+            )
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            if arch_path.name.lower().endswith(".zip"):
+                with zipfile.ZipFile(arch_path, "r") as zf:
+                    for m in zf.infolist():
+                        if not (bin_dir / m.filename).resolve().is_relative_to(bin_dir.resolve()):
+                            raise ValueError(f"Unsafe zip member: {m.filename}")
+                    zf.extractall(bin_dir)
+            else:
+                with tarfile.open(arch_path, "r:gz") as tf:
+                    for m in tf.getmembers():
+                        if not (bin_dir / m.name).resolve().is_relative_to(bin_dir.resolve()):
+                            raise ValueError(f"Unsafe tar member: {m.name}")
+                    tf.extractall(bin_dir)
+            arch_path.unlink(missing_ok=True)
+            if sys.platform != "win32":
+                srv_exe = _find_ocria1_server_exe()
+                if srv_exe is not None:
+                    os.chmod(srv_exe, 0o755)
+
+        prompt_dest = OCRIA1_DIR / "prompt.txt"
+        if not prompt_dest.exists():
+            download_file(
+                f"{_OCRIA1_HF_BASE}/prompt.txt",
+                prompt_dest,
+                on_progress=lambda p, m: _emit_progress(on_progress, 5, m),
+                timeout=30.0,
+                label="prompt.txt",
+            )
+
+        mmproj_dest = OCRIA1_DIR / "mmproj-OCRia-1-f16.gguf"
+        if not mmproj_dest.exists():
+            download_file(
+                f"{_OCRIA1_HF_BASE}/mmproj-OCRia-1-f16.gguf",
+                mmproj_dest,
+                on_progress=lambda p, m: _emit_progress(on_progress, 6 + int(p * 0.12), m),
+                timeout=180.0,
+                label="mmproj-OCRia-1-f16.gguf",
+                resume=True,
+            )
+
+        gguf_dest = OCRIA1_DIR / "OCRia-1-Q8_0.gguf"
+        if not gguf_dest.exists():
+            download_file(
+                f"{_OCRIA1_HF_BASE}/OCRia-1-Q8_0.gguf",
+                gguf_dest,
+                on_progress=lambda p, m: _emit_progress(on_progress, 18 + int(p * 0.81), m),
+                timeout=300.0,
+                label="OCRia-1-Q8_0.gguf",
+                resume=True,
+            )
+
+        (OCRIA1_DIR / ".ready").write_text("ok", encoding="utf-8")
+        _emit_progress(on_progress, 100, "OCRia-1")
         return
 
     if model_id in _TESS_VARIANTS:
@@ -846,6 +995,12 @@ def remove_model(model_id: str) -> None:
         with _engine_lock:
             _liteparse_cache.pop("ocria-nano", None)
         models.rm("ocria-nano")
+        return
+
+    if model_id == "ocria-1":
+        shutdown_engines()
+        if OCRIA1_DIR.exists():
+            shutil.rmtree(OCRIA1_DIR, ignore_errors=True)
         return
 
     if model_id in _TESS_VARIANTS:
@@ -1123,6 +1278,157 @@ def _extract_marker(image: Image.Image) -> str:
             pass
 
 
+def _strip_markdown_fence(text: str) -> str:
+    s = text.strip()
+    m = re.match(r"^```(?:markdown|md)?\s*\n([\s\S]*?)\n```\s*$", s, re.I)
+    return m.group(1).strip() if m else s
+
+
+def _post_vision_chat(
+    base_url: str,
+    body: Dict[str, Any],
+    api_key: str = "",
+    timeout: float = 45.0,
+) -> str:
+    base = base_url.strip().rstrip("/")
+    url = f"{base}/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    if api_key.strip():
+        headers["Authorization"] = f"Bearer {api_key.strip()}"
+
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+
+    choices = data.get("choices") or []
+    if not choices:
+        return ""
+    msg = choices[0].get("message") or {}
+    content = msg.get("content", "")
+    return content.strip() if isinstance(content, str) else ""
+
+
+def shutdown_engines() -> None:
+    """Stop any background local inference daemon cleanly on exit or model removal."""
+    global _llama_proc, _llama_port
+    proc = _llama_proc
+    _llama_proc = None
+    _llama_port = None
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=4.0)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+
+atexit.register(shutdown_engines)
+
+
+def _ensure_ocria1_server() -> int:
+    global _llama_proc, _llama_port
+    if _llama_proc is not None and _llama_proc.poll() is None and _llama_port is not None:
+        return _llama_port
+
+    exe = _find_ocria1_server_exe()
+    gguf = OCRIA1_DIR / "OCRia-1-Q8_0.gguf"
+    mmproj = OCRIA1_DIR / "mmproj-OCRia-1-f16.gguf"
+    if exe is None or not gguf.exists() or not mmproj.exists():
+        raise RuntimeError("OCRia-1 files missing. Re-install OCRia-1 from Model Manager.")
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+
+    env = os.environ.copy()
+    if sys.platform != "win32":
+        prev_ld = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = f"{exe.parent}{os.pathsep}{prev_ld}" if prev_ld else str(exe.parent)
+
+    _llama_proc = subprocess.Popen(
+        [
+            str(exe),
+            "-m", str(gguf),
+            "--mmproj", str(mmproj),
+            "--jinja",
+            "-c", "16384",
+            "-ngl", "99",
+            "--host", "127.0.0.1",
+            "--port", str(port),
+        ],
+        cwd=str(exe.parent),
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    _llama_port = port
+
+    deadline = time.monotonic() + 90.0
+    health_url = f"http://127.0.0.1:{port}/health"
+    while time.monotonic() < deadline:
+        if _llama_proc.poll() is not None:
+            rc = _llama_proc.returncode
+            _llama_proc = None
+            _llama_port = None
+            raise RuntimeError(f"OCRia-1 llama-server exited early (code {rc})")
+        try:
+            with urllib.request.urlopen(health_url, timeout=1.5) as resp:
+                if getattr(resp, "status", 0) == 200:
+                    return port
+        except Exception:
+            time.sleep(0.35)
+
+    shutdown_engines()
+    raise RuntimeError("Timed out starting local OCRia-1 llama-server")
+
+
+def _extract_ocria1(image: Image.Image, output_format: str) -> str:
+    prepared = _preprocess_ocr_image(image, allow_invert=False, upscale_small=False)
+    buf = io.BytesIO()
+    prepared.save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
+    prompt_file = OCRIA1_DIR / "prompt.txt"
+    if output_format == "markdown":
+        sys_prompt = (
+            prompt_file.read_text(encoding="utf-8").strip()
+            if prompt_file.exists()
+            else _OCRIA1_FALLBACK_PROMPT
+        )
+    else:
+        sys_prompt = "Transcribe all text from this image verbatim as clean plain text. Do not describe or summarize."
+
+    body: Dict[str, Any] = {
+        "model": "OCRia-1",
+        "temperature": 0.0,
+        "max_tokens": 4096,
+        "chat_template_kwargs": {"enable_thinking": False},
+        "messages": [
+            {"role": "system", "content": sys_prompt},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                ],
+            },
+        ],
+    }
+
+    with _engine_lock:
+        port = _ensure_ocria1_server()
+        raw = _post_vision_chat(f"http://127.0.0.1:{port}/v1", body, timeout=180.0)
+    return _clean_ocr_text(_strip_markdown_fence(raw))
+
+
 def _extract_vision_api(
     image: Image.Image,
     base_url: str,
@@ -1140,7 +1446,7 @@ def _extract_vision_api(
         else "Extract all text from this image verbatim as plain text. Output only the extracted text."
     )
 
-    body = {
+    body: Dict[str, Any] = {
         "model": model_name,
         "temperature": 0.0,
         "messages": [
@@ -1153,28 +1459,7 @@ def _extract_vision_api(
             }
         ],
     }
-
-    base = base_url.strip().rstrip("/")
-    url = f"{base}/chat/completions"
-    headers = {"Content-Type": "application/json"}
-    if api_key.strip():
-        headers["Authorization"] = f"Bearer {api_key.strip()}"
-
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(body).encode("utf-8"),
-        headers=headers,
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=45.0) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-
-    choices = data.get("choices") or []
-    if not choices:
-        return ""
-    msg = choices[0].get("message") or {}
-    content = msg.get("content", "")
-    return content.strip() if isinstance(content, str) else ""
+    return _post_vision_chat(base_url, body, api_key=api_key, timeout=45.0)
 
 
 def extract_text(
@@ -1190,6 +1475,8 @@ def extract_text(
     spec = _CATALOG_MAP.get(active_model_id)
     if spec:
         kind = spec["kind"]
+        if kind == "ocria_1":
+            return _extract_ocria1(image, output_format)
         if kind == "rapidocr":
             return _extract_rapidocr(image, active_model_id, output_format)
         if kind == "easyocr":
