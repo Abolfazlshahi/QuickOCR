@@ -309,12 +309,12 @@ def main() -> None:
     # Dark-mode mixed Persian+English OCR quality check
     from PySide6.QtGui import QColor, QImage, QPainter
     from PySide6.QtCore import QRect
-    dark_qi = QImage(760, 70, QImage.Format_RGB888)
+    dark_qi = QImage(780, 80, QImage.Format_RGB888)
     dark_qi.fill(QColor(18, 18, 22))
     dp = QPainter(dark_qi)
     dp.setPen(QColor(244, 244, 245))
-    dp.setFont(QFont("Tahoma", 11))
-    dp.drawText(QRect(16, 10, 728, 50), Qt.AlignRight | Qt.AlignVCenter, "در یک مرورگر YouTube حدود 3 برابر سریع‌تر کار می‌کند.")
+    dp.setFont(QFont(family, 13))
+    dp.drawText(QRect(16, 10, 748, 60), Qt.AlignRight | Qt.AlignVCenter, "سلام دنیای QuickOCR نسخه 2026 عالی است.")
     dp.end()
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
         dp_path = Path(tf.name)
@@ -326,7 +326,12 @@ def main() -> None:
     prepped = ocr_engine._preprocess_ocr_image(dark_pil)
     assert prepped.getpixel((4, 4))[0] > 200 and prepped.width > dark_pil.width
     fa_out = ocr_engine.extract_text(dark_pil, output_format="text")
-    assert "YouTube" in fa_out and "3" in fa_out and " " in fa_out, f"Bad dark FA OCR: {fa_out!r}"
+    assert (
+        "quickocr" in fa_out.lower()
+        and "2026" in fa_out
+        and fa_out.count(" ") >= 4
+        and any("\u0600" <= ch <= "\u06ff" for ch in fa_out)
+    ), f"Bad dark FA OCR: {fa_out!r}"
 
     QTimer.singleShot(250, win.quit_app)
     qapp.exec()

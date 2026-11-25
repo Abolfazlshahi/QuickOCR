@@ -123,7 +123,7 @@ jobs:
 
       - name: Run standalone headless Qt/OCR checks on Linux
         run: |
-          LITEPARSE_MODEL_DIR="$PWD/models" xvfb-run -a runtime/bin/python3 check_ocr.py
+          LITEPARSE_MODEL_DIR="$PWD/models" xvfb-run -a -s "-screen 0 1280x1024x24" runtime/bin/python3 check_ocr.py
           rm -f config.json
 
       - name: Package self-contained Linux Portable tar.gz & AppImage
